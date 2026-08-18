@@ -7,8 +7,9 @@
 ## 🛠️ Nodes Included
 
 ### 1. AIMZ Auto Multiple Pad
-Automatically pads images and masks to be divisible by any chosen multiple (default: **32**) with zero quality loss.
-* **None-Safe Pass-through:** If input image or mask is `None` (empty branch/slot), it passes through `None` without raising exceptions, enabling seamless dynamic conditional branching.
+Automatically pads images, masks, or video frame batches to be divisible by any chosen multiple (default: **32**) with zero quality loss.
+* **None-Safe Pass-through:** If input image/video or mask is `None` (empty branch/slot), it passes through `None` and `0` without raising exceptions, enabling seamless dynamic conditional branching.
+* **Dimensions & Frame Count:** Also outputs `width`, `height`, and `count` (frame count), replacing `GetImageSizeAndCount` with full None-safety!
 * **Default Settings:** Default pad mode is `constant` with `white` background.
 * **Flexible Pad Modes:** Supports `constant`, `reflect`, `replicate`, and `circular`.
 * **Color Customization:** Supports named colors (`white`, `black`, `gray`), hex (`#ffffff`), and normalized RGB tuples (`1,1,1`, `0,0,0`).

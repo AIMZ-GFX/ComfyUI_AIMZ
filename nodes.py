@@ -58,8 +58,9 @@ def parse_color(color_str):
 
 class AIMZ_AutoMultiplePad:
     """
-    Automatically pads images/masks to be divisible by a given multiple (e.g. 32 for MiniMax-H3).
-    Completely safe against None inputs (returns None without crashing for easy dynamic branching).
+    Automatically pads images/masks/video frames to be divisible by a given multiple (e.g. 32).
+    Outputs padded image, mask, original dimensions (width, height), frame count, padding offsets, and pad_info.
+    Completely safe against None inputs (returns None/0 without crashing for easy dynamic branching).
     """
     @classmethod
     def INPUT_TYPES(s):
@@ -70,19 +71,19 @@ class AIMZ_AutoMultiplePad:
                 "pad_color": ("STRING", {"default": "white", "tooltip": "Used when pad_mode is constant (e.g. 'white', 'black', '1,1,1', '0,0,0', '#ffffff')"}),
             },
             "optional": {
-                "image": ("IMAGE", {"tooltip": "Optional image input. If None, returns None without error."}),
+                "image": ("IMAGE", {"tooltip": "Optional image/video frame batch input. If None, returns None without error."}),
                 "mask": ("MASK", {"tooltip": "Optional mask input. If provided, padded with same padding."}),
             }
         }
 
-    RETURN_TYPES = ("IMAGE", "MASK", "INT", "INT", "INT", "INT", "PAD_INFO")
-    RETURN_NAMES = ("image", "mask", "left", "right", "top", "bottom", "pad_info")
+    RETURN_TYPES = ("IMAGE", "MASK", "INT", "INT", "INT", "INT", "INT", "INT", "INT", "PAD_INFO")
+    RETURN_NAMES = ("image", "mask", "width", "height", "count", "left", "right", "top", "bottom", "pad_info")
     FUNCTION = "pad"
     CATEGORY = "AIMZ/Image"
 
     def pad(self, multiple=32, pad_mode="constant", pad_color="white", image=None, mask=None):
         if image is None and mask is None:
-            return (None, None, 0, 0, 0, 0, None)
+            return (None, None, 0, 0, 0, 0, 0, 0, 0, None)
 
         pad_left = 0
         pad_right = 0
@@ -91,14 +92,21 @@ class AIMZ_AutoMultiplePad:
         
         padded_image = None
         padded_mask = None
+        count = 0
 
-        # Determine reference H, W
+        # Determine reference H, W, and frame count
         if image is not None:
             # ComfyUI Image format: [B, H, W, C]
+            count = image.shape[0]
             h, w = image.shape[1], image.shape[2]
         else:
             # Mask format: [B, H, W] or [H, W]
-            h, w = mask.shape[-2], mask.shape[-1]
+            if mask.dim() == 2:
+                count = 1
+                h, w = mask.shape[0], mask.shape[1]
+            else:
+                count = mask.shape[0]
+                h, w = mask.shape[1], mask.shape[2]
 
         # Calculate padding needed
         pad_w = ((w + multiple - 1) // multiple * multiple) - w
@@ -118,6 +126,7 @@ class AIMZ_AutoMultiplePad:
             "orig_height": h,
             "padded_width": w + pad_w,
             "padded_height": h + pad_h,
+            "count": count,
         }
 
         # Process Image
@@ -171,7 +180,7 @@ class AIMZ_AutoMultiplePad:
                 m_padded = F.pad(m, (pad_left, pad_right, pad_top, pad_bottom), mode=mask_mode, value=0.0)
                 padded_mask = m_padded.squeeze(1)
 
-        return (padded_image, padded_mask, pad_left, pad_right, pad_top, pad_bottom, pad_info)
+        return (padded_image, padded_mask, w, h, count, pad_left, pad_right, pad_top, pad_bottom, pad_info)
 
 
 class AIMZ_AutoMultipleUnpad:
