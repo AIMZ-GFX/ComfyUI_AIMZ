@@ -16,7 +16,10 @@ Automatically pads images and masks to be divisible by any chosen multiple (e.g.
 ### 2. AIMZ Auto Multiple Unpad
 Restores padded images or masks back to their original input dimensions using `pad_info` or manual coordinate offsets.
 
-*(More utility nodes will be added continuously to this suite!)*
+### 3. AIMZ Preview Image (None Safe)
+A bulletproof replacement for ComfyUI's standard `PreviewImage` node.
+* **None-Safe:** If the input image is `None` or an empty branch, it skips cleanly **without throwing `TypeError: NoneType` errors**.
+* **Pass-Through Output:** Also outputs the image so you can chain it cleanly in your workflows.
 
 ---
 
@@ -24,7 +27,7 @@ Restores padded images or masks back to their original input dimensions using `p
 
 ### Method 1: ComfyUI Manager (Recommended)
 1. Open **ComfyUI Manager** -> **Custom Nodes Manager**.
-2. Search for **`comfyui-aimz`** or **`AIMZ`**.
+2. Search for **`comfyui_aimz`** or **`AIMZ`**.
 3. Click **Install** and restart ComfyUI.
 
 ### Method 2: Install via Git URL
