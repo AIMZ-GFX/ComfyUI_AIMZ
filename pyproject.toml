@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "comfyui-aimz"
-version = "0.1.0"
-description = "Auto multiple padding (32x safe) and unpadding utility nodes for MiniMax-H3 and ComfyUI workflows."
+version = "0.1.1"
+description = "A versatile collection of essential workflow helper and utility nodes for ComfyUI by AIMZ / CEC Tools."
 readme = "README.md"
 license = { text = "MIT" }
 authors = [
