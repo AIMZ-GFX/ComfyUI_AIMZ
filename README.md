@@ -29,13 +29,13 @@ Restores padded images or masks back to their original input dimensions using `p
 
 ### Method 2: Install via Git URL
 1. In ComfyUI Manager, select **Install via Git URL**.
-2. Enter: `https://github.com/khwhite0413/ComfyUI_AIMZ`
+2. Enter: `https://github.com/AIMZ-GFX/ComfyUI_AIMZ`
 3. Restart ComfyUI.
 
 ### Method 3: Manual Clone
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/khwhite0413/ComfyUI_AIMZ.git
+git clone https://github.com/AIMZ-GFX/ComfyUI_AIMZ.git
 ```
 
 ---

@@ -4,21 +4,21 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "comfyui-aimz"
-version = "0.1.1"
+version = "0.1.0"
 description = "A versatile collection of essential workflow helper and utility nodes for ComfyUI by AIMZ / CEC Tools."
 readme = "README.md"
 license = { text = "MIT" }
 authors = [
-    { name = "khwhite0413" }
+    { name = "AIMZ-GFX" }
 ]
 dependencies = [
     "torch"
 ]
 
 [project.urls]
-Repository = "https://github.com/khwhite0413/ComfyUI_AIMZ"
+Repository = "https://github.com/AIMZ-GFX/ComfyUI_AIMZ"
 
 [tool.comfy]
-PublisherId = "khwhite0413"
+PublisherId = "AIMZ-GFX"
 DisplayName = "ComfyUI_AIMZ"
 Icon = ""
