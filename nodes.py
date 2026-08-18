@@ -17,7 +17,7 @@ def parse_color(color_str):
     into normalized RGB float tuple (r, g, b) in [0.0, 1.0].
     """
     if not color_str:
-        return (0.0, 0.0, 0.0)
+        return (1.0, 1.0, 1.0)
     
     color_str = color_str.strip().lower()
     named_colors = {
@@ -53,7 +53,7 @@ def parse_color(color_str):
         except ValueError:
             pass
             
-    return (0.0, 0.0, 0.0)
+    return (1.0, 1.0, 1.0)
 
 
 class AIMZ_AutoMultiplePad:
@@ -66,8 +66,8 @@ class AIMZ_AutoMultiplePad:
         return {
             "required": {
                 "multiple": ("INT", {"default": 32, "min": 1, "max": 512, "step": 1, "tooltip": "Resolution multiple (e.g., 32 for MiniMax-H3)"}),
-                "pad_mode": (["reflect", "replicate", "constant", "circular"], {"default": "reflect"}),
-                "pad_color": ("STRING", {"default": "black", "tooltip": "Used when pad_mode is constant (e.g. 'black', 'white', '0,0,0', '1,1,1')"}),
+                "pad_mode": (["constant", "reflect", "replicate", "circular"], {"default": "constant"}),
+                "pad_color": ("STRING", {"default": "white", "tooltip": "Used when pad_mode is constant (e.g. 'white', 'black', '1,1,1', '0,0,0', '#ffffff')"}),
             },
             "optional": {
                 "image": ("IMAGE", {"tooltip": "Optional image input. If None, returns None without error."}),
@@ -80,7 +80,7 @@ class AIMZ_AutoMultiplePad:
     FUNCTION = "pad"
     CATEGORY = "AIMZ/Image"
 
-    def pad(self, multiple=32, pad_mode="reflect", pad_color="black", image=None, mask=None):
+    def pad(self, multiple=32, pad_mode="constant", pad_color="white", image=None, mask=None):
         if image is None and mask is None:
             return (None, None, 0, 0, 0, 0, None)
 

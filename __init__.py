@@ -7,7 +7,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "AIMZ_AutoMultiplePad": "AIMZ Auto Multiple Pad (32x Safe)",
+    "AIMZ_AutoMultiplePad": "AIMZ Auto Multiple Pad",
     "AIMZ_AutoMultipleUnpad": "AIMZ Auto Multiple Unpad",
     "AIMZ_PreviewImageNoneSafe": "AIMZ Preview Image (None Safe)",
 }

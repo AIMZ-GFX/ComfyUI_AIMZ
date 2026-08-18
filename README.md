@@ -6,11 +6,12 @@
 
 ## 🛠️ Nodes Included
 
-### 1. AIMZ Auto Multiple Pad (32x Safe)
-Automatically pads images and masks to be divisible by any chosen multiple (e.g. 8, 16, 32, 64) with zero quality loss.
+### 1. AIMZ Auto Multiple Pad
+Automatically pads images and masks to be divisible by any chosen multiple (default: **32**) with zero quality loss.
 * **None-Safe Pass-through:** If input image or mask is `None` (empty branch/slot), it passes through `None` without raising exceptions, enabling seamless dynamic conditional branching.
-* **Flexible Pad Modes:** Supports `reflect` (recommended for seamless AI generation), `replicate`, `constant`, and `circular`.
-* **Color Customization:** Supports named colors (`black`, `white`, `gray`), hex (`#ffffff`), and normalized RGB tuples (`0,0,0`, `1,1,1`).
+* **Default Settings:** Default pad mode is `constant` with `white` background.
+* **Flexible Pad Modes:** Supports `constant`, `reflect`, `replicate`, and `circular`.
+* **Color Customization:** Supports named colors (`white`, `black`, `gray`), hex (`#ffffff`), and normalized RGB tuples (`1,1,1`, `0,0,0`).
 * **Mask Synchronization:** Accurately pads associated masks with identical offsets.
 
 ### 2. AIMZ Auto Multiple Unpad
