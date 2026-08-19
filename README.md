@@ -15,10 +15,15 @@ Automatically pads images, masks, or video frame batches to be divisible by any 
 * **Color Customization:** Supports named colors (`white`, `black`, `gray`), hex (`#ffffff`), and normalized RGB tuples (`1,1,1`, `0,0,0`).
 * **Mask Synchronization:** Accurately pads associated masks with identical offsets.
 
-### 2. AIMZ Auto Multiple Unpad
+### 2. AIMZ Freeze Frame Pad
+Pads video frame sequences with repeated freeze frames at the beginning and/or end (e.g. 15 frames for MiniMax-H3 motion buffer).
+* **Replaces 5 Nodes:** Replaces `GetImageFromBatch` (start), `RepeatImages` (start), `GetImageFromBatch` (end), `RepeatImages` (end), and `ImageBatchMulti` into a single, clean node.
+* **None-Safe:** If video is `None`, passes through `None` and `count=0` cleanly without errors.
+
+### 3. AIMZ Auto Multiple Unpad
 Restores padded images or masks back to their original input dimensions using `pad_info` or manual coordinate offsets.
 
-### 3. AIMZ Preview Image (None Safe)
+### 4. AIMZ Preview Image (None Safe)
 A bulletproof replacement for ComfyUI's standard `PreviewImage` node.
 * **None-Safe:** If the input image is `None` or an empty branch, it skips cleanly **without throwing `TypeError: NoneType` errors**.
 * **Pass-Through Output:** Also outputs the image so you can chain it cleanly in your workflows.

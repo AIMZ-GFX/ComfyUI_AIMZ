@@ -246,6 +246,57 @@ class AIMZ_AutoMultipleUnpad:
         return (unpadded_image, unpadded_mask)
 
 
+class AIMZ_FreezeFramePad:
+    """
+    Pads a video frame sequence with repeated freeze frames at the start and end.
+    Replaces 5 separate nodes (GetImageFromBatch x2, RepeatImages x2, ImageBatchMulti).
+    Completely safe against None inputs (returns None without crashing for optional video branches).
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "pad_start_frames": ("INT", {"default": 15, "min": 0, "max": 1000, "step": 1, "tooltip": "Number of freeze frames to prepend to the start of the video"}),
+                "pad_end_frames": ("INT", {"default": 15, "min": 0, "max": 1000, "step": 1, "tooltip": "Number of freeze frames to append to the end of the video"}),
+            },
+            "optional": {
+                "image": ("IMAGE", {"tooltip": "Input video frames [B, H, W, C]. If None, returns None without error."}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "INT")
+    RETURN_NAMES = ("images", "count")
+    FUNCTION = "pad_frames"
+    CATEGORY = "AIMZ/Video"
+
+    def pad_frames(self, pad_start_frames=15, pad_end_frames=15, image=None):
+        if image is None:
+            return (None, 0)
+        
+        try:
+            if not isinstance(image, torch.Tensor) or image.dim() < 4 or image.shape[0] == 0:
+                return (None, 0)
+        except Exception:
+            return (None, 0)
+
+        chunks = []
+        # Prepend start frames (replicate first frame)
+        if pad_start_frames > 0:
+            first_frame = image[0:1].repeat(pad_start_frames, 1, 1, 1)
+            chunks.append(first_frame)
+        
+        # Original video frames
+        chunks.append(image)
+
+        # Append end frames (replicate last frame)
+        if pad_end_frames > 0:
+            last_frame = image[-1:].repeat(pad_end_frames, 1, 1, 1)
+            chunks.append(last_frame)
+
+        padded_video = torch.cat(chunks, dim=0)
+        return (padded_video, padded_video.shape[0])
+
+
 class AIMZ_PreviewImageNoneSafe:
     """
     A None-Safe Image Preview node.
