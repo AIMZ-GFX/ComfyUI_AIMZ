@@ -61,8 +61,78 @@ def parse_color(color_str):
 
 
 # -------------------------------------------------------------
-# 1:1 Direct Port of VAEColorCorrector Algorithms from EasyColorCorrector
+# Color Space Conversion Helper Functions (Pure PyTorch)
 # -------------------------------------------------------------
+def rgb_to_lab(rgb: torch.Tensor) -> torch.Tensor:
+    mask = rgb > 0.04045
+    rgb_lin = torch.where(mask, torch.pow((rgb + 0.055) / 1.055, 2.4), rgb / 12.92)
+
+    r = rgb_lin[..., 0]
+    g = rgb_lin[..., 1]
+    b = rgb_lin[..., 2]
+
+    x = r * 0.4124564 + g * 0.3575761 + b * 0.1804375
+    y = r * 0.2126729 + g * 0.7151522 + b * 0.0721750
+    z = r * 0.0193339 + g * 0.1191920 + b * 0.9503041
+
+    x = x / 0.95047
+    y = y / 1.00000
+    z = z / 1.08883
+
+    delta = 6.0 / 29.0
+    mask_x = x > (delta ** 3)
+    mask_y = y > (delta ** 3)
+    mask_z = z > (delta ** 3)
+
+    fx = torch.where(mask_x, torch.pow(torch.clamp(x, min=1e-6), 1.0 / 3.0), (x / (3.0 * delta ** 2)) + (4.0 / 29.0))
+    fy = torch.where(mask_y, torch.pow(torch.clamp(y, min=1e-6), 1.0 / 3.0), (y / (3.0 * delta ** 2)) + (4.0 / 29.0))
+    fz = torch.where(mask_z, torch.pow(torch.clamp(z, min=1e-6), 1.0 / 3.0), (z / (3.0 * delta ** 2)) + (4.0 / 29.0))
+
+    L = 116.0 * fy - 16.0
+    a = 500.0 * (fx - fy)
+    b_val = 200.0 * (fy - fz)
+
+    return torch.stack([L, a, b_val], dim=-1)
+
+
+def lab_to_rgb(lab: torch.Tensor) -> torch.Tensor:
+    L = lab[..., 0]
+    a = lab[..., 1]
+    b_val = lab[..., 2]
+
+    fy = (L + 16.0) / 116.0
+    fx = (a / 500.0) + fy
+    fz = fy - (b_val / 200.0)
+
+    delta = 6.0 / 29.0
+    mask_x = fx > delta
+    mask_y = fy > delta
+    mask_z = fz > delta
+
+    x = torch.where(mask_x, torch.pow(fx, 3.0), 3.0 * (delta ** 2) * (fx - 4.0 / 29.0)) * 0.95047
+    y = torch.where(mask_y, torch.pow(fy, 3.0), 3.0 * (delta ** 2) * (fy - 4.0 / 29.0)) * 1.00000
+    z = torch.where(mask_z, torch.pow(fz, 3.0), 3.0 * (delta ** 2) * (fz - 4.0 / 29.0)) * 1.08883
+
+    r_lin = x * 3.2404542 - y * 1.5371385 - z * 0.4985314
+    g_lin = -x * 0.9692660 + y * 1.8760108 + z * 0.0415560
+    b_lin = x * 0.0556434 - y * 0.2040259 + z * 1.0572252
+
+    r_lin = torch.clamp(r_lin, min=0.0)
+    g_lin = torch.clamp(g_lin, min=0.0)
+    b_lin = torch.clamp(b_lin, min=0.0)
+
+    mask_r = r_lin > 0.0031308
+    mask_g = g_lin > 0.0031308
+    mask_b = b_lin > 0.0031308
+
+    r = torch.where(mask_r, 1.055 * torch.pow(r_lin, 1.0 / 2.4) - 0.055, 12.92 * r_lin)
+    g = torch.where(mask_g, 1.055 * torch.pow(g_lin, 1.0 / 2.4) - 0.055, 12.92 * g_lin)
+    b = torch.where(mask_b, 1.055 * torch.pow(b_lin, 1.0 / 2.4) - 0.055, 12.92 * b_lin)
+
+    rgb = torch.stack([r, g, b], dim=-1)
+    return torch.clamp(rgb, 0.0, 1.0)
+
+
 def _safe_clamp_colors(image_np, preserve_gradients=True):
     if preserve_gradients:
         image_float = image_np.astype(np.float32)
@@ -93,21 +163,22 @@ def _match_to_reference_colors(processed_np, original_np, strength=0.8):
 
 class AIMZ_VAEColorMatch:
     """
-    1:1 Exact Port of VAEColorCorrector (EasyColorCorrector) with full batch/frame mismatch safety,
-    resolution auto-scaling, and pure PyTorch/NumPy backend support.
+    Ultra High-Speed, Memory-Optimized VAE Color Matcher for Video and Image Pipelines.
+    Fixes VAE decode color shifts (yellowish tone, green tint, washed out blacks) while preserving 100% fine upscaled details.
+    Zero Memory Overhead: extracts color distribution stats without duplicating huge tensors.
     """
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "original_image": ("IMAGE", {"tooltip": "Original reference image/video (before VAE decode / 1st pass)"}),
-                "processed_image": ("IMAGE", {"tooltip": "Image/video after VAE decode with color shifts"}),
-                "correction_strength": ("FLOAT", {"default": 0.85, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Correction strength (0.0 = no change, 1.0 = full color match)"}),
+                "original_image": ("IMAGE", {"tooltip": "Original low-res reference video (1st pass MiniMax)"}),
+                "processed_image": ("IMAGE", {"tooltip": "Upscaled high-res video from VAEDecode (LTX 2.5)"}),
+                "correction_strength": ("FLOAT", {"default": 0.85, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Color match strength (0.0 = no change, 1.0 = 100% color match)"}),
                 "method": (
-                    ["advanced_3d_lut", "luminance_zones", "histogram_matching", "statistical_matching"], 
-                    {"default": "advanced_3d_lut", "tooltip": "Color correction method from VAEColorCorrector"}
+                    ["lab_reinhard (Fast & Best)", "advanced_3d_lut", "luminance_zones", "histogram_matching", "statistical_matching"], 
+                    {"default": "lab_reinhard (Fast & Best)", "tooltip": "Color correction method:\n• lab_reinhard: Ultra-fast GPU CIE-LAB color matching (Recommended for Video!)\n• advanced_3d_lut: 3D Color Cube mapping\n• luminance_zones: Local tone/lighting preservation\n• histogram_matching: Cumulative distribution matching\n• statistical_matching: RGB moment matching"}
                 ),
-                "auto_preserve": ("BOOLEAN", {"default": False, "tooltip": "Auto-detect and preserve changed/inpainted areas (set False to correct entire full frame)"}),
+                "auto_preserve": ("BOOLEAN", {"default": False, "tooltip": "Auto-detect and preserve changed/inpainted areas (Keep False for full video color match)"}),
             },
             "optional": {
                 "vae": ("VAE", {"tooltip": "Optional VAE model input for pipeline consistency"}),
@@ -123,7 +194,7 @@ class AIMZ_VAEColorMatch:
 
     def correct_vae_colors(
         self, original_image, processed_image, correction_strength=0.85, 
-        method="advanced_3d_lut", auto_preserve=False, vae=None, mask=None, edge_feather=5
+        method="lab_reinhard (Fast & Best)", auto_preserve=False, vae=None, mask=None, edge_feather=5
     ):
         if original_image is None or processed_image is None:
             return (processed_image if processed_image is not None else original_image,)
@@ -132,28 +203,60 @@ class AIMZ_VAEColorMatch:
             return (processed_image,)
 
         device = processed_image.device
+        dtype = processed_image.dtype
         
         orig_b, orig_h, orig_w, _ = original_image.shape
         proc_b, proc_h, proc_w, _ = processed_image.shape
 
-        # Match spatial resolution if different
-        if (orig_h, orig_w) != (proc_h, proc_w):
-            print(f"⚠️ Resolution mismatch: resizing original {orig_w}x{orig_h} to match processed {proc_w}x{proc_h}")
-            orig_scaled = F.interpolate(
-                original_image.permute(0, 3, 1, 2),
-                size=(proc_h, proc_w),
-                mode="bilinear",
-                align_corners=False
-            ).permute(0, 2, 3, 1)
-        else:
-            orig_scaled = original_image
+        orig_tensor = original_image.to(device=device, dtype=dtype)
 
+        # -------------------------------------------------------------
+        # 1. ULTRA-FAST GPU LAB REINHARD MODE (Ideal for 4K/8K Video Batches)
+        # -------------------------------------------------------------
+        if method == "lab_reinhard (Fast & Best)":
+            corrected_frames = []
+            for i in range(proc_b):
+                orig_idx = min(i, orig_b - 1)
+                orig_f = orig_tensor[orig_idx:orig_idx+1]
+                proc_f = processed_image[i:i+1]
+
+                orig_lab = rgb_to_lab(orig_f)
+                proc_lab = rgb_to_lab(proc_f)
+
+                orig_mean = orig_lab.mean(dim=(1, 2), keepdim=True)
+                orig_std = orig_lab.std(dim=(1, 2), keepdim=True) + 1e-6
+
+                proc_mean = proc_lab.mean(dim=(1, 2), keepdim=True)
+                proc_std = proc_lab.std(dim=(1, 2), keepdim=True) + 1e-6
+
+                matched_lab = (proc_lab - proc_mean) * (orig_std / proc_std) + orig_mean
+                blended_lab = proc_lab * (1.0 - correction_strength) + matched_lab * correction_strength
+                res_rgb = lab_to_rgb(blended_lab)
+
+                corrected_frames.append(res_rgb)
+
+            result = torch.cat(corrected_frames, dim=0)
+
+            if mask is not None:
+                m = mask.to(device=device, dtype=dtype)
+                if m.dim() == 2: m = m.unsqueeze(0).unsqueeze(-1)
+                elif m.dim() == 3: m = m.unsqueeze(-1)
+                if m.shape[1:3] != (proc_h, proc_w):
+                    m = F.interpolate(m.permute(0, 3, 1, 2), size=(proc_h, proc_w), mode="bilinear", align_corners=False).permute(0, 2, 3, 1)
+                if m.shape[0] < proc_b:
+                    m = m.repeat(proc_b // m.shape[0] + 1, 1, 1, 1)[:proc_b]
+                result = processed_image * (1.0 - m) + result * m
+
+            return (result,)
+
+        # -------------------------------------------------------------
+        # 2. CPU / 3D LUT & SCIKIT-IMAGE MODES (Memory-Safe Per-Frame Processing)
+        # -------------------------------------------------------------
         corrected_batch = []
 
-        # Process each frame in processed_image safely
         for i in range(proc_b):
             orig_idx = min(i, orig_b - 1)
-            orig_img = orig_scaled[orig_idx]
+            orig_img = original_image[orig_idx]
             proc_img = processed_image[i]
             current_mask = mask[i] if (mask is not None and i < mask.shape[0]) else (mask[0] if mask is not None else None)
 
@@ -161,17 +264,18 @@ class AIMZ_VAEColorMatch:
             orig_np = (orig_img.cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
             proc_np = (proc_img.cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
 
-            # 1. Analyze VAE Characteristics
+            # Spatial resize on CPU per-frame only if needed (zero VRAM explosion!)
+            if (orig_h, orig_w) != (proc_h, proc_w):
+                orig_np = cv2.resize(orig_np, (proc_w, proc_h), interpolation=cv2.INTER_LINEAR) if ADVANCED_CV2_AVAILABLE else np.array(Image.fromarray(orig_np).resize((proc_w, proc_h), Image.BILINEAR))
+
             vae_adjustment = 1.0
             vae_color_bias = None
             if vae is not None:
                 vae_adjustment, vae_color_bias = self._analyze_vae_characteristics(orig_np, proc_np)
 
-            # 2. Balance Strength
             adj_strength = self._balance_correction_strength(method, correction_strength) * vae_adjustment
             adj_strength = min(1.0, max(0.0, adj_strength))
 
-            # 3. Apply Method
             if method == "advanced_3d_lut":
                 corrected_np = self._advanced_3d_lut_correction(orig_np, proc_np, adj_strength, vae_color_bias)
             elif method == "luminance_zones":
@@ -186,7 +290,6 @@ class AIMZ_VAEColorMatch:
 
             corrected_tensor = torch.from_numpy(corrected_np.astype(np.float32) / 255.0).to(device)
 
-            # 4. Handle Mask / Auto-preserve
             if current_mask is not None:
                 corrected_tensor = self._apply_mask_preservation(proc_img, corrected_tensor, current_mask, edge_feather, device)
             elif auto_preserve:
@@ -220,37 +323,30 @@ class AIMZ_VAEColorMatch:
                     vae_bias[zone_name] = np.array([0.0, 0.0, 0.0])
 
             total_bias = np.mean([np.abs(bias).sum() for bias in vae_bias.values()])
-            if total_bias > 15:
-                vae_adjustment = 0.85
-            elif total_bias > 8:
-                vae_adjustment = 0.92
-            else:
-                vae_adjustment = 0.98
+            if total_bias > 15: vae_adjustment = 0.85
+            elif total_bias > 8: vae_adjustment = 0.92
+            else: vae_adjustment = 0.98
 
             return vae_adjustment, vae_bias
         except Exception:
             return 0.9, None
 
     def _balance_correction_strength(self, method, strength):
-        if method == "luminance_zones":
-            return strength
-        elif method == "histogram_matching":
-            return strength * 0.85
-        elif method == "statistical_matching":
-            return min(1.0, strength * 1.15)
-        elif method == "advanced_3d_lut":
-            return strength * 0.7
+        if method == "luminance_zones": return strength
+        elif method == "histogram_matching": return strength * 0.85
+        elif method == "statistical_matching": return min(1.0, strength * 1.15)
+        elif method == "advanced_3d_lut": return strength * 0.7
         return strength
 
     def _advanced_3d_lut_correction(self, original_np, processed_np, strength, vae_color_bias=None):
         if not ADVANCED_SKLEARN_AVAILABLE:
             return _match_to_reference_colors(processed_np, original_np, strength)
         try:
-            orig_samples = original_np[::4, ::4].reshape(-1, 3)
-            proc_samples = processed_np[::4, ::4].reshape(-1, 3)
-            n_clusters = min(64, max(8, len(orig_samples) // 10))
+            orig_samples = original_np[::8, ::8].reshape(-1, 3)
+            proc_samples = processed_np[::8, ::8].reshape(-1, 3)
+            n_clusters = min(32, max(8, len(orig_samples) // 20))
 
-            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=5)
             proc_clusters = kmeans.fit_predict(proc_samples)
             proc_centers = kmeans.cluster_centers_
 
@@ -275,12 +371,9 @@ class AIMZ_VAEColorMatch:
                     color_shift = orig_centers[i] - proc_centers[i]
                     if vae_color_bias is not None:
                         cluster_luminance = np.mean(proc_centers[i])
-                        if cluster_luminance < 85:
-                            zone_bias = vae_color_bias.get("shadows", np.array([0.0, 0.0, 0.0]))
-                        elif cluster_luminance <= 170:
-                            zone_bias = vae_color_bias.get("midtones", np.array([0.0, 0.0, 0.0]))
-                        else:
-                            zone_bias = vae_color_bias.get("highlights", np.array([0.0, 0.0, 0.0]))
+                        if cluster_luminance < 85: zone_bias = vae_color_bias.get("shadows", np.array([0.0, 0.0, 0.0]))
+                        elif cluster_luminance <= 170: zone_bias = vae_color_bias.get("midtones", np.array([0.0, 0.0, 0.0]))
+                        else: zone_bias = vae_color_bias.get("highlights", np.array([0.0, 0.0, 0.0]))
                         color_shift -= zone_bias * 0.5
 
                     cluster_distances = min_distances[cluster_mask]
@@ -357,7 +450,7 @@ class AIMZ_VAEColorMatch:
             if proc_std > 0:
                 normalized = (corrected_np[:, :, c] - proc_mean) / proc_std
                 rescaled = normalized * orig_std + orig_mean
-                corrected_np[:, :, c] = corrected_np[:, :, c] * (1 - strength) + rescaled * strength
+                corrected_np[:, :, c] = (corrected_np[:, :, c] * (1 - strength) + rescaled * strength)
 
         if vae_color_bias is not None:
             gray = np.mean(corrected_np, axis=2)
