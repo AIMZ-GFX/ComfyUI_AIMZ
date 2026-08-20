@@ -371,6 +371,40 @@ class AIMZ_AudioSilencePad:
         return (result_audio, total_duration, round(start_sec, 4), round(end_sec, 4))
 
 
+class AIMZ_FallbackSwitch:
+    """
+    Universal Any-Type Fallback Switch (Coalesce).
+    Accepts ANY data type (IMAGE, AUDIO, LATENT, MODEL, CONDITIONING, etc.) like Get/Set nodes.
+    If 'primary' is not None, it passes 'primary'.
+    If 'primary' is None, it seamlessly outputs 'fallback'.
+    If both are None, cleanly returns None without error.
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {},
+            "optional": {
+                "primary": ("*", {"tooltip": "1st Priority input. If not None, this value is passed through."}),
+                "fallback": ("*", {"tooltip": "2nd Priority input. Passed through if primary is None."}),
+                "fallback_2": ("*", {"tooltip": "Optional 3rd Priority fallback."}),
+            }
+        }
+
+    RETURN_TYPES = ("*",)
+    RETURN_NAMES = ("output",)
+    FUNCTION = "coalesce"
+    CATEGORY = "AIMZ/Workflow"
+
+    def coalesce(self, primary=None, fallback=None, fallback_2=None):
+        if primary is not None:
+            return (primary,)
+        if fallback is not None:
+            return (fallback,)
+        if fallback_2 is not None:
+            return (fallback_2,)
+        return (None,)
+
+
 class AIMZ_PreviewImageNoneSafe:
     """
     A None-Safe Image Preview node.
