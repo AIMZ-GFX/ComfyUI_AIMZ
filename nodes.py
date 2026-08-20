@@ -62,11 +62,9 @@ def rgb_to_lab(rgb: torch.Tensor) -> torch.Tensor:
     """
     Converts RGB tensor [..., 3] with values in [0, 1] to CIE-LAB.
     """
-    # RGB to linear sRGB
     mask = rgb > 0.04045
     rgb_lin = torch.where(mask, torch.pow((rgb + 0.055) / 1.055, 2.4), rgb / 12.92)
 
-    # sRGB to XYZ (D65)
     r = rgb_lin[..., 0]
     g = rgb_lin[..., 1]
     b = rgb_lin[..., 2]
@@ -75,12 +73,10 @@ def rgb_to_lab(rgb: torch.Tensor) -> torch.Tensor:
     y = r * 0.2126729 + g * 0.7151522 + b * 0.0721750
     z = r * 0.0193339 + g * 0.1191920 + b * 0.9503041
 
-    # Normalize for D65 white point
     x = x / 0.95047
     y = y / 1.00000
     z = z / 1.08883
 
-    # XYZ to LAB
     delta = 6.0 / 29.0
     mask_x = x > (delta ** 3)
     mask_y = y > (delta ** 3)
@@ -118,12 +114,10 @@ def lab_to_rgb(lab: torch.Tensor) -> torch.Tensor:
     y = torch.where(mask_y, torch.pow(fy, 3.0), 3.0 * (delta ** 2) * (fy - 4.0 / 29.0)) * 1.00000
     z = torch.where(mask_z, torch.pow(fz, 3.0), 3.0 * (delta ** 2) * (fz - 4.0 / 29.0)) * 1.08883
 
-    # XYZ to linear sRGB
     r_lin = x * 3.2404542 - y * 1.5371385 - z * 0.4985314
     g_lin = -x * 0.9692660 + y * 1.8760108 + z * 0.0415560
     b_lin = x * 0.0556434 - y * 0.2040259 + z * 1.0572252
 
-    # Linear to sRGB gamma
     r_lin = torch.clamp(r_lin, min=0.0)
     g_lin = torch.clamp(g_lin, min=0.0)
     b_lin = torch.clamp(b_lin, min=0.0)
@@ -157,6 +151,7 @@ class AIMZ_VAEColorMatch:
                 "method": (["lab_moments (Reinhard)", "luminance_zones", "rgb_moments"], {"default": "lab_moments (Reinhard)", "tooltip": "Color matching algorithm:\n• lab_moments: Best perceptual color and tone transfer\n• luminance_zones: Preserves local lighting while correcting tints\n• rgb_moments: Fast global RGB channel match"}),
             },
             "optional": {
+                "vae": ("VAE", {"tooltip": "Optional VAE model input for pipeline consistency"}),
                 "mask": ("MASK", {"tooltip": "Optional mask to limit correction areas"}),
             }
         }
@@ -166,7 +161,7 @@ class AIMZ_VAEColorMatch:
     FUNCTION = "match_colors"
     CATEGORY = "AIMZ/Color"
 
-    def match_colors(self, original_image, processed_image, strength=0.85, method="lab_moments (Reinhard)", mask=None):
+    def match_colors(self, original_image, processed_image, strength=0.85, method="lab_moments (Reinhard)", vae=None, mask=None):
         if original_image is None or processed_image is None:
             return (processed_image if processed_image is not None else original_image,)
 
@@ -187,42 +182,32 @@ class AIMZ_VAEColorMatch:
         corrected_frames = []
 
         for i in range(proc_b):
-            # Safe index mapping: clamp or loop safely to original frame index
+            # Safe index mapping: clamp safely to original frame index
             orig_idx = min(i, orig_b - 1)
             
-            orig_f = orig[orig_idx:orig_idx+1] # [1, H1, W1, 3]
-            proc_f = proc[i:i+1]               # [1, H2, W2, 3]
+            orig_f = orig[orig_idx:orig_idx+1]
+            proc_f = proc[i:i+1]
 
             if method == "lab_moments (Reinhard)":
-                # Convert both to LAB
                 orig_lab = rgb_to_lab(orig_f)
                 proc_lab = rgb_to_lab(proc_f)
 
-                # Compute mean and standard deviation per channel
                 orig_mean = orig_lab.mean(dim=(1, 2), keepdim=True)
                 orig_std = orig_lab.std(dim=(1, 2), keepdim=True) + 1e-6
 
                 proc_mean = proc_lab.mean(dim=(1, 2), keepdim=True)
                 proc_std = proc_lab.std(dim=(1, 2), keepdim=True) + 1e-6
 
-                # Transfer color distribution
                 matched_lab = (proc_lab - proc_mean) * (orig_std / proc_std) + orig_mean
-                # Blend with original LAB based on strength
                 blended_lab = proc_lab * (1.0 - strength) + matched_lab * strength
                 
                 res_rgb = lab_to_rgb(blended_lab)
 
             elif method == "luminance_zones":
-                # Luminance zone matching (Shadows, Midtones, Highlights)
-                lum_orig = 0.299 * orig_f[..., 0:1] + 0.587 * orig_f[..., 1:2] + 0.114 * orig_f[..., 2:3]
-                lum_proc = 0.299 * proc_f[..., 0:1] + 0.587 * proc_f[..., 1:2] + 0.114 * proc_f[..., 2:3]
-
-                # Global bias
                 mean_orig = orig_f.mean(dim=(1, 2), keepdim=True)
                 mean_proc = proc_f.mean(dim=(1, 2), keepdim=True)
                 bias = mean_orig - mean_proc
 
-                # Apply bias compensated by luminance
                 matched_rgb = proc_f + bias
                 matched_rgb = torch.clamp(matched_rgb, 0.0, 1.0)
                 res_rgb = proc_f * (1.0 - strength) + matched_rgb * strength
@@ -250,13 +235,11 @@ class AIMZ_VAEColorMatch:
             elif m.dim() == 3:
                 m = m.unsqueeze(-1)
             
-            # Resize mask if spatial dimensions mismatch
             if m.shape[1:3] != (proc_h, proc_w):
                 m_t = m.permute(0, 3, 1, 2)
                 m_t = F.interpolate(m_t, size=(proc_h, proc_w), mode="bilinear", align_corners=False)
                 m = m_t.permute(0, 2, 3, 1)
 
-            # Match mask batch size
             if m.shape[0] < proc_b:
                 m = m.repeat(proc_b // m.shape[0] + 1, 1, 1, 1)[:proc_b]
 
@@ -303,13 +286,10 @@ class AIMZ_AutoMultiplePad:
         padded_mask = None
         count = 0
 
-        # Determine reference H, W, and frame count
         if image is not None:
-            # ComfyUI Image format: [B, H, W, C]
             count = image.shape[0]
             h, w = image.shape[1], image.shape[2]
         else:
-            # Mask format: [B, H, W] or [H, W]
             if mask.dim() == 2:
                 count = 1
                 h, w = mask.shape[0], mask.shape[1]
@@ -317,7 +297,6 @@ class AIMZ_AutoMultiplePad:
                 count = mask.shape[0]
                 h, w = mask.shape[1], mask.shape[2]
 
-        # Calculate padding needed
         pad_w = ((w + multiple - 1) // multiple * multiple) - w
         pad_h = ((h + multiple - 1) // multiple * multiple) - h
 
@@ -338,7 +317,6 @@ class AIMZ_AutoMultiplePad:
             "count": count,
         }
 
-        # Process Image
         if image is not None:
             if pad_w == 0 and pad_h == 0:
                 padded_image = image
@@ -366,7 +344,6 @@ class AIMZ_AutoMultiplePad:
 
                 padded_image = img_padded.permute(0, 2, 3, 1)
 
-        # Process Mask
         if mask is not None:
             if pad_w == 0 and pad_h == 0:
                 padded_mask = mask
