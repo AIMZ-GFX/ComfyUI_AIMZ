@@ -314,7 +314,7 @@ class AIMZ_AudioSilencePad:
             },
             "optional": {
                 "audio": ("AUDIO", {"tooltip": "Input audio dictionary {'waveform': tensor, 'sample_rate': int}. If None, returns None without error."}),
-                "source_fps": ("FLOAT", {"tooltip": "Optional source video FPS (from Get_FPS or video loader, overrides default_fps)"}),
+                "source_fps": ("FLOAT", {"forceInput": True, "tooltip": "Optional source video FPS (from Get_FPS or video loader, overrides default_fps)"}),
             }
         }
 
@@ -470,22 +470,21 @@ class AIMZ_SelectiveGroupBypasser:
 class AIMZ_VideoDurationSelector:
     """
     Smart Video Duration and Frame Calculator for V2V and R2V pipelines.
-    Seamlessly switches between Source Video Duration (V2V) and Custom Seconds (R2V),
-    automatically calculates total frames using MiniMax H3 alignment formulas (17n + 5),
-    and supports dynamic FPS override from source video with safe fallback.
+    - In Source Video (V2V) mode: strictly follows the source video duration (if 0.0 or not connected, outputs 0 frames).
+    - In Custom Seconds (R2V) mode: uses custom_seconds to calculate exact MiniMax H3 frames.
     """
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "mode": (["Source Video (V2V)", "Custom Seconds (R2V)"], {"default": "Custom Seconds (R2V)"}),
+                "mode": (["Source Video (V2V)", "Custom Seconds (R2V)"], {"default": "Source Video (V2V)"}),
                 "custom_seconds": ("FLOAT", {"default": 6.0, "min": 0.1, "max": 600.0, "step": 0.1, "round": 0.01, "tooltip": "Desired duration in seconds for R2V mode"}),
                 "default_fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 240.0, "step": 1.0, "tooltip": "Default FPS used when source_fps is not connected"}),
                 "minimax_align": ("BOOLEAN", {"default": True, "tooltip": "Align frame count to MiniMax H3 formula: max(5, round(sec * fps)) + (5 - (max(...) % 17)) % 17"}),
             },
             "optional": {
-                "source_duration": ("FLOAT", {"tooltip": "Optional duration in seconds from source video (Get_duration)"}),
-                "source_fps": ("FLOAT", {"tooltip": "Optional source video FPS (from Get_FPS or video loader, overrides default_fps)"}),
+                "source_duration": ("FLOAT", {"forceInput": True, "tooltip": "Connect Get_duration (seconds)"}),
+                "source_fps": ("FLOAT", {"forceInput": True, "tooltip": "Connect Get_FPS"}),
             }
         }
 
@@ -494,20 +493,22 @@ class AIMZ_VideoDurationSelector:
     FUNCTION = "calculate_duration"
     CATEGORY = "AIMZ/Workflow"
 
-    def calculate_duration(self, mode="Custom Seconds (R2V)", custom_seconds=6.0, default_fps=24.0, minimax_align=True, source_duration=None, source_fps=None):
+    def calculate_duration(self, mode="Source Video (V2V)", custom_seconds=6.0, default_fps=24.0, minimax_align=True, source_duration=None, source_fps=None):
         # 1. Determine Effective FPS
         if source_fps is not None and isinstance(source_fps, (int, float)) and source_fps > 0:
             effective_fps = float(source_fps)
         else:
             effective_fps = float(default_fps) if default_fps > 0 else 24.0
 
-        # 2. Determine Effective Duration (Seconds)
+        # 2. Determine Effective Duration (Seconds) based strictly on Mode
         if mode == "Source Video (V2V)":
             if source_duration is not None and isinstance(source_duration, (int, float)) and source_duration > 0:
                 effective_sec = float(source_duration)
             else:
-                effective_sec = float(custom_seconds)
+                # When in V2V mode and no source video duration is provided (or 0.0), return 0
+                return (0, 0.0, effective_fps, 0)
         else:
+            # Custom Seconds (R2V) Mode
             effective_sec = float(custom_seconds)
 
         # 3. Calculate Raw Frame Count
