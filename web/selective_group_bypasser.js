@@ -9,7 +9,6 @@ app.registerExtension({
                 const r = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
 
                 this.properties = this.properties || {};
-                // managedGroups: Array of { title: string, bypassed: boolean }
                 this.properties.managedGroups = this.properties.managedGroups || [];
 
                 const node = this;
@@ -92,33 +91,48 @@ app.registerExtension({
                     node.rebuildDynamicWidgets();
                 };
 
-                // Global mousemove/mouseup listener for smooth drag-reorder
-                const onCanvasMouseMove = (e) => {
-                    if (draggingIndex === null) return;
-
-                    // Calculate which row index cursor is currently hovering over
-                    const nodePos = node.pos;
-                    const canvasMouse = app.canvas.graph_to_canvas ? app.canvas.graph_to_canvas(nodePos) : nodePos;
-                    // Widget row calculation
-                    const staticHeight = 85;
-                    const rowHeight = 28;
-                    const relativeY = e.canvasY ? (e.canvasY - node.pos[1]) : (e.clientY - node.pos[1]);
-                    
-                    const targetIdx = Math.floor((relativeY - staticHeight + 20) / rowHeight);
-                    if (targetIdx >= 0 && targetIdx < node.properties.managedGroups.length && targetIdx !== draggingIndex) {
-                        node.moveManagedGroup(draggingIndex, targetIdx);
-                        draggingIndex = targetIdx;
+                // Global Pointer Tracking for 100% Reliable Drag and Drop
+                const stopDrag = () => {
+                    if (draggingIndex !== null) {
+                        draggingIndex = null;
+                        window.removeEventListener("pointermove", handlePointerMove, true);
+                        window.removeEventListener("pointerup", stopDrag, true);
+                        window.removeEventListener("mousemove", handlePointerMove, true);
+                        window.removeEventListener("mouseup", stopDrag, true);
+                        if (app.canvas) app.canvas.setDirty(true, true);
                     }
                 };
 
-                const onCanvasMouseUp = () => {
-                    if (draggingIndex !== null) {
-                        draggingIndex = null;
-                        document.removeEventListener("pointermove", onCanvasMouseMove);
-                        document.removeEventListener("pointerup", onCanvasMouseUp);
-                        document.removeEventListener("mousemove", onCanvasMouseMove);
-                        document.removeEventListener("mouseup", onCanvasMouseUp);
-                        if (app.canvas) app.canvas.setDirty(true, true);
+                const handlePointerMove = (e) => {
+                    if (draggingIndex === null) return;
+
+                    // If mouse button is not pressed, immediately cancel drag
+                    if (e.buttons === 0) {
+                        stopDrag();
+                        return;
+                    }
+
+                    // Calculate local Y on node canvas
+                    let canvasY = e.canvasY;
+                    if (canvasY === undefined && app.canvas) {
+                        const canvasEl = app.canvas.canvas;
+                        if (canvasEl) {
+                            const rect = canvasEl.getBoundingClientRect();
+                            const clientY = e.clientY - rect.top;
+                            canvasY = (clientY / app.canvas.ds.scale) - app.canvas.ds.offset[1];
+                        }
+                    }
+
+                    if (canvasY !== undefined) {
+                        const localY = canvasY - node.pos[1];
+                        const staticHeight = 85;
+                        const rowHeight = 28;
+                        const targetIdx = Math.floor((localY - staticHeight + 14) / rowHeight);
+
+                        if (targetIdx >= 0 && targetIdx < node.properties.managedGroups.length && targetIdx !== draggingIndex) {
+                            node.moveManagedGroup(draggingIndex, targetIdx);
+                            draggingIndex = targetIdx;
+                        }
                     }
                 };
 
@@ -146,9 +160,11 @@ app.registerExtension({
                                 // 1. Glassmorphism Row Background
                                 ctx.beginPath();
                                 ctx.roundRect(x, y, w, h, 4);
-                                ctx.fillStyle = gItem.bypassed ? "rgba(45, 20, 20, 0.7)" : "rgba(20, 38, 28, 0.7)";
+                                ctx.fillStyle = (draggingIndex === idx) ? "rgba(70, 70, 120, 0.85)" : 
+                                               (gItem.bypassed ? "rgba(45, 20, 20, 0.7)" : "rgba(20, 38, 28, 0.7)");
                                 ctx.fill();
-                                ctx.strokeStyle = gItem.bypassed ? "rgba(180, 60, 60, 0.4)" : "rgba(60, 160, 90, 0.4)";
+                                ctx.strokeStyle = (draggingIndex === idx) ? "#7090ff" : 
+                                                 (gItem.bypassed ? "rgba(180, 60, 60, 0.4)" : "rgba(60, 160, 90, 0.4)");
                                 ctx.lineWidth = 1;
                                 ctx.stroke();
 
@@ -200,11 +216,11 @@ app.registerExtension({
 
                                 ctx.beginPath();
                                 ctx.roundRect(handleX, handleY, handleW, handleH, 3);
-                                ctx.fillStyle = "rgba(255, 255, 255, 0.05)";
+                                ctx.fillStyle = (draggingIndex === idx) ? "rgba(255, 255, 255, 0.2)" : "rgba(255, 255, 255, 0.05)";
                                 ctx.fill();
 
                                 // Draw 3 horizontal lines (≡)
-                                ctx.strokeStyle = "#888888";
+                                ctx.strokeStyle = (draggingIndex === idx) ? "#ffffff" : "#888888";
                                 ctx.lineWidth = 1.5;
                                 for (let i = -3; i <= 3; i += 3) {
                                     ctx.beginPath();
@@ -233,21 +249,21 @@ app.registerExtension({
                                 ctx.restore();
                             },
                             mouse: function (event, pos, node) {
+                                const margin = 8;
+                                const h = 24;
+                                const w = node.size[0] - margin * 2;
+                                const x = margin;
+
+                                const clickX = pos[0];
+                                const clickY = pos[1];
+
+                                const delBtnW = 16;
+                                const delBtnX = x + w - delBtnW - 4;
+
+                                const handleW = 18;
+                                const handleX = x + w - handleW - 24;
+
                                 if (event.type === "pointerdown" || event.type === "mousedown") {
-                                    const margin = 8;
-                                    const h = 24;
-                                    const w = node.size[0] - margin * 2;
-                                    const x = margin;
-
-                                    const clickX = pos[0];
-                                    const clickY = pos[1];
-
-                                    const delBtnW = 16;
-                                    const delBtnX = x + w - delBtnW - 4;
-
-                                    const handleW = 18;
-                                    const handleX = x + w - handleW - 24;
-
                                     // 1. Clicked [✕] Delete Button
                                     if (clickX >= delBtnX && clickX <= (delBtnX + delBtnW)) {
                                         node.removeManagedGroup(this.index);
@@ -257,14 +273,14 @@ app.registerExtension({
                                     // 2. Clicked [≡] Drag Handle -> Start Drag Reordering
                                     if (clickX >= handleX && clickX <= (handleX + handleW)) {
                                         draggingIndex = this.index;
-                                        document.addEventListener("pointermove", onCanvasMouseMove);
-                                        document.addEventListener("pointerup", onCanvasMouseUp);
-                                        document.addEventListener("mousemove", onCanvasMouseMove);
-                                        document.addEventListener("mouseup", onCanvasMouseUp);
+                                        window.addEventListener("pointermove", handlePointerMove, true);
+                                        window.addEventListener("pointerup", stopDrag, true);
+                                        window.addEventListener("mousemove", handlePointerMove, true);
+                                        window.addEventListener("mouseup", stopDrag, true);
                                         return true;
                                     }
 
-                                    // 3. Clicked the Row Body -> Toggle Bypass
+                                    // 3. Clicked Row Body -> Toggle Bypass
                                     if (clickX >= x && clickX < handleX) {
                                         node.toggleGroupBypass(this.groupItem);
                                         return true;
