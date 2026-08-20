@@ -21,7 +21,7 @@ app.registerExtension({
                 }
 
                 // Widget 1: Group Selector Combo
-                const groupCombo = node.addWidget("combo", "Select Group", "", (value) => {}, {
+                const groupCombo = node.addWidget("combo", "Group", "", (value) => {}, {
                     values: () => {
                         const all = getCanvasGroups();
                         return all.length > 0 ? all : ["(No Groups Found)"];
@@ -29,7 +29,7 @@ app.registerExtension({
                 });
 
                 // Widget 2: Add Group Button
-                node.addWidget("button", "➕ Add Selected Group", null, () => {
+                node.addWidget("button", "➕ Add Group", null, () => {
                     const selected = groupCombo.value;
                     if (!selected || selected === "(No Groups Found)") return;
 
@@ -79,15 +79,13 @@ app.registerExtension({
                     node.rebuildDynamicWidgets();
                 };
 
-                // Rebuild sleek, compact 1-line custom widgets
+                // Rebuild sleek, compact 1-line custom widgets with clean Left-Alignment & Modern LED Dot UI
                 node.rebuildDynamicWidgets = function () {
-                    // Retain only the first 2 static widgets (Combo & Add button)
                     const staticCount = 2;
                     while (node.widgets.length > staticCount) {
                         node.widgets.pop();
                     }
 
-                    // Create a single compact row widget per group
                     node.properties.managedGroups.forEach((gItem, idx) => {
                         const rowWidget = {
                             type: "aimz_group_row",
@@ -95,67 +93,76 @@ app.registerExtension({
                             groupItem: gItem,
                             index: idx,
                             draw: function (ctx, node, widget_width, y, widget_height) {
-                                const margin = 10;
-                                const h = 26;
+                                const margin = 8;
+                                const h = 24;
                                 const w = widget_width - margin * 2;
                                 const x = margin;
 
-                                // Row Background Box
                                 ctx.save();
+
+                                // 1. Modern Glassmorphism Row Background
                                 ctx.beginPath();
                                 ctx.roundRect(x, y, w, h, 4);
-                                ctx.fillStyle = gItem.bypassed ? "#3a1e1e" : "#1e3324";
+                                ctx.fillStyle = gItem.bypassed ? "rgba(45, 20, 20, 0.7)" : "rgba(20, 38, 28, 0.7)";
                                 ctx.fill();
-                                ctx.strokeStyle = gItem.bypassed ? "#7a2a2a" : "#2a6a3b";
+                                ctx.strokeStyle = gItem.bypassed ? "rgba(180, 60, 60, 0.4)" : "rgba(60, 160, 90, 0.4)";
                                 ctx.lineWidth = 1;
                                 ctx.stroke();
 
-                                // Status Badge (Left Pill)
-                                const badgeW = 68;
-                                const badgeH = 18;
-                                const badgeX = x + 4;
-                                const badgeY = y + 4;
+                                // 2. Sleek Neon LED Indicator Dot (Left Aligned)
+                                const dotX = x + 12;
+                                const dotY = y + h / 2;
+                                const dotRadius = 4;
+
                                 ctx.beginPath();
-                                ctx.roundRect(badgeX, badgeY, badgeW, badgeH, 3);
-                                ctx.fillStyle = gItem.bypassed ? "#a83232" : "#2e8b57";
+                                ctx.arc(dotX, dotY, dotRadius, 0, Math.PI * 2);
+                                ctx.fillStyle = gItem.bypassed ? "#ff4d4d" : "#00e676";
                                 ctx.fill();
 
-                                ctx.font = "bold 10px sans-serif";
-                                ctx.fillStyle = "#ffffff";
-                                ctx.textAlign = "center";
-                                ctx.textBaseline = "middle";
-                                ctx.fillText(gItem.bypassed ? "BYPASS" : "ACTIVE", badgeX + badgeW / 2, badgeY + badgeH / 2);
+                                // Glow effect for Active LED
+                                if (!gItem.bypassed) {
+                                    ctx.beginPath();
+                                    ctx.arc(dotX, dotY, dotRadius + 2, 0, Math.PI * 2);
+                                    ctx.fillStyle = "rgba(0, 230, 118, 0.25)";
+                                    ctx.fill();
+                                }
 
-                                // Group Title Text
-                                ctx.font = "12px sans-serif";
-                                ctx.fillStyle = gItem.bypassed ? "#cccccc" : "#ffffff";
+                                // 3. Status Tag (Left Aligned, Modern Typography)
+                                ctx.font = "600 10px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+                                ctx.fillStyle = gItem.bypassed ? "#ff7b7b" : "#69f0ae";
                                 ctx.textAlign = "left";
                                 ctx.textBaseline = "middle";
-                                const textX = badgeX + badgeW + 8;
-                                const maxTextW = w - badgeW - 35;
+                                const statusText = gItem.bypassed ? "BYPASS" : "ACTIVE";
+                                ctx.fillText(statusText, dotX + 8, dotY);
+
+                                // 4. Group Title (Left Aligned, Clean)
+                                const titleX = dotX + 62;
+                                ctx.font = "11px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+                                ctx.fillStyle = gItem.bypassed ? "#8a8a8a" : "#f0f0f0";
                                 
+                                const maxTitleW = w - 90;
                                 let title = gItem.title;
-                                if (ctx.measureText(title).width > maxTextW) {
-                                    while (title.length > 3 && ctx.measureText(title + "...").width > maxTextW) {
+                                if (ctx.measureText(title).width > maxTitleW) {
+                                    while (title.length > 3 && ctx.measureText(title + "...").width > maxTitleW) {
                                         title = title.slice(0, -1);
                                     }
                                     title += "...";
                                 }
-                                ctx.fillText(title, textX, y + h / 2);
+                                ctx.fillText(title, titleX, dotY);
 
-                                // Delete (X) Button on the right
-                                const delBtnW = 20;
-                                const delBtnH = 18;
+                                // 5. Minimalist Ghost Delete Button (Right Aligned)
+                                const delBtnW = 16;
+                                const delBtnH = 16;
                                 const delBtnX = x + w - delBtnW - 4;
-                                const delBtnY = y + 4;
+                                const delBtnY = y + (h - delBtnH) / 2;
 
                                 ctx.beginPath();
                                 ctx.roundRect(delBtnX, delBtnY, delBtnW, delBtnH, 3);
-                                ctx.fillStyle = "#444444";
+                                ctx.fillStyle = "rgba(255, 255, 255, 0.06)";
                                 ctx.fill();
 
-                                ctx.font = "bold 11px sans-serif";
-                                ctx.fillStyle = "#ff6666";
+                                ctx.font = "10px sans-serif";
+                                ctx.fillStyle = "rgba(255, 100, 100, 0.8)";
                                 ctx.textAlign = "center";
                                 ctx.textBaseline = "middle";
                                 ctx.fillText("✕", delBtnX + delBtnW / 2, delBtnY + delBtnH / 2);
@@ -164,16 +171,15 @@ app.registerExtension({
                             },
                             mouse: function (event, pos, node) {
                                 if (event.type === "pointerdown" || event.type === "mousedown") {
-                                    const margin = 10;
-                                    const h = 26;
+                                    const margin = 8;
+                                    const h = 24;
                                     const w = node.size[0] - margin * 2;
                                     const x = margin;
-                                    const y = this.last_y || 0;
 
                                     const clickX = pos[0];
                                     const clickY = pos[1];
 
-                                    const delBtnW = 20;
+                                    const delBtnW = 16;
                                     const delBtnX = x + w - delBtnW - 4;
 
                                     // Check if clicked the [X] button
@@ -191,16 +197,16 @@ app.registerExtension({
                                 return false;
                             },
                             computeSize: function (width) {
-                                return [width, 30];
+                                return [width, 28];
                             }
                         };
 
                         node.widgets.push(rowWidget);
                     });
 
-                    // Compact auto-resizing
-                    const minWidth = 280;
-                    const calculatedHeight = 90 + (node.properties.managedGroups.length * 32);
+                    // Sleek auto-resizing
+                    const minWidth = 260;
+                    const calculatedHeight = 85 + (node.properties.managedGroups.length * 28);
                     node.size = [Math.max(node.size[0] || minWidth, minWidth), calculatedHeight];
 
                     if (app.canvas) {
@@ -208,7 +214,6 @@ app.registerExtension({
                     }
                 };
 
-                // Initialize on load
                 setTimeout(() => {
                     node.rebuildDynamicWidgets();
                 }, 100);
