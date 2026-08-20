@@ -163,20 +163,20 @@ def _match_to_reference_colors(processed_np, original_np, strength=0.8):
 
 class AIMZ_VAEColorMatch:
     """
-    Ultra High-Speed, Memory-Optimized VAE Color Matcher for Video and Image Pipelines.
-    Fixes VAE decode color shifts (yellowish tone, green tint, washed out blacks) while preserving 100% fine upscaled details.
-    Zero Memory Overhead: extracts color distribution stats without duplicating huge tensors.
+    Automatic Resolution Matching VAE Color Matcher for Video and Image Pipelines.
+    Automatically detects processed_image resolution and seamlessly scales original_image to match it.
+    Features all 5 professional correction methods with 100% batch-frame mismatch safety.
     """
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "original_image": ("IMAGE", {"tooltip": "Original low-res reference video (1st pass MiniMax)"}),
-                "processed_image": ("IMAGE", {"tooltip": "Upscaled high-res video from VAEDecode (LTX 2.5)"}),
-                "correction_strength": ("FLOAT", {"default": 0.85, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Color match strength (0.0 = no change, 1.0 = 100% color match)"}),
+                "original_image": ("IMAGE", {"tooltip": "Original reference image/video (will be auto-resized to match processed_image)"}),
+                "processed_image": ("IMAGE", {"tooltip": "Target image/video after VAE decode with color shifts"}),
+                "correction_strength": ("FLOAT", {"default": 0.85, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Color match strength (0.0 = no change, 1.0 = full color match)"}),
                 "method": (
-                    ["lab_reinhard (Fast & Best)", "advanced_3d_lut", "luminance_zones", "histogram_matching", "statistical_matching"], 
-                    {"default": "lab_reinhard (Fast & Best)", "tooltip": "Color correction method:\n• lab_reinhard: Ultra-fast GPU CIE-LAB color matching (Recommended for Video!)\n• advanced_3d_lut: 3D Color Cube mapping\n• luminance_zones: Local tone/lighting preservation\n• histogram_matching: Cumulative distribution matching\n• statistical_matching: RGB moment matching"}
+                    ["advanced_3d_lut", "luminance_zones", "histogram_matching", "statistical_matching", "lab_reinhard"], 
+                    {"default": "advanced_3d_lut", "tooltip": "Color correction method"}
                 ),
                 "auto_preserve": ("BOOLEAN", {"default": False, "tooltip": "Auto-detect and preserve changed/inpainted areas (Keep False for full video color match)"}),
             },
@@ -194,7 +194,7 @@ class AIMZ_VAEColorMatch:
 
     def correct_vae_colors(
         self, original_image, processed_image, correction_strength=0.85, 
-        method="lab_reinhard (Fast & Best)", auto_preserve=False, vae=None, mask=None, edge_feather=5
+        method="advanced_3d_lut", auto_preserve=False, vae=None, mask=None, edge_feather=5
     ):
         if original_image is None or processed_image is None:
             return (processed_image if processed_image is not None else original_image,)
@@ -208,12 +208,25 @@ class AIMZ_VAEColorMatch:
         orig_b, orig_h, orig_w, _ = original_image.shape
         proc_b, proc_h, proc_w, _ = processed_image.shape
 
-        orig_tensor = original_image.to(device=device, dtype=dtype)
+        # -------------------------------------------------------------
+        # Auto-Resize original_image to match processed_image resolution
+        # -------------------------------------------------------------
+        if (orig_h, orig_w) != (proc_h, proc_w):
+            print(f"🔄 Auto-resizing original ({orig_w}x{orig_h}) to match processed ({proc_w}x{proc_h})...")
+            orig_scaled = F.interpolate(
+                original_image.permute(0, 3, 1, 2),
+                size=(proc_h, proc_w),
+                mode="bilinear",
+                align_corners=False
+            ).permute(0, 2, 3, 1)
+        else:
+            orig_scaled = original_image
 
         # -------------------------------------------------------------
-        # 1. ULTRA-FAST GPU LAB REINHARD MODE (Ideal for 4K/8K Video Batches)
+        # Fast GPU LAB Reinhard Method
         # -------------------------------------------------------------
-        if method == "lab_reinhard (Fast & Best)":
+        if method == "lab_reinhard":
+            orig_tensor = orig_scaled.to(device=device, dtype=dtype)
             corrected_frames = []
             for i in range(proc_b):
                 orig_idx = min(i, orig_b - 1)
@@ -232,7 +245,6 @@ class AIMZ_VAEColorMatch:
                 matched_lab = (proc_lab - proc_mean) * (orig_std / proc_std) + orig_mean
                 blended_lab = proc_lab * (1.0 - correction_strength) + matched_lab * correction_strength
                 res_rgb = lab_to_rgb(blended_lab)
-
                 corrected_frames.append(res_rgb)
 
             result = torch.cat(corrected_frames, dim=0)
@@ -250,23 +262,18 @@ class AIMZ_VAEColorMatch:
             return (result,)
 
         # -------------------------------------------------------------
-        # 2. CPU / 3D LUT & SCIKIT-IMAGE MODES (Memory-Safe Per-Frame Processing)
+        # CPU 3D LUT / Luminance / Histogram / Statistical Methods
         # -------------------------------------------------------------
         corrected_batch = []
 
         for i in range(proc_b):
             orig_idx = min(i, orig_b - 1)
-            orig_img = original_image[orig_idx]
+            orig_img = orig_scaled[orig_idx]
             proc_img = processed_image[i]
             current_mask = mask[i] if (mask is not None and i < mask.shape[0]) else (mask[0] if mask is not None else None)
 
-            # Convert to numpy uint8
             orig_np = (orig_img.cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
             proc_np = (proc_img.cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
-
-            # Spatial resize on CPU per-frame only if needed (zero VRAM explosion!)
-            if (orig_h, orig_w) != (proc_h, proc_w):
-                orig_np = cv2.resize(orig_np, (proc_w, proc_h), interpolation=cv2.INTER_LINEAR) if ADVANCED_CV2_AVAILABLE else np.array(Image.fromarray(orig_np).resize((proc_w, proc_h), Image.BILINEAR))
 
             vae_adjustment = 1.0
             vae_color_bias = None
