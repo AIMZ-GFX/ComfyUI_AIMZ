@@ -44,7 +44,6 @@ def parse_color(color_str):
     if len(parts) >= 3:
         try:
             vals = [float(p) for p in parts[:3]]
-            # If values look like 0~255, normalize to 0~1
             if any(v > 1.0 for v in vals):
                 vals = [v / 255.0 for v in vals]
             return (max(0.0, min(1.0, vals[0])),
@@ -54,6 +53,216 @@ def parse_color(color_str):
             pass
             
     return (1.0, 1.0, 1.0)
+
+
+# -------------------------------------------------------------
+# Color Space Conversion Helper Functions (Pure PyTorch)
+# -------------------------------------------------------------
+def rgb_to_lab(rgb: torch.Tensor) -> torch.Tensor:
+    """
+    Converts RGB tensor [..., 3] with values in [0, 1] to CIE-LAB.
+    """
+    # RGB to linear sRGB
+    mask = rgb > 0.04045
+    rgb_lin = torch.where(mask, torch.pow((rgb + 0.055) / 1.055, 2.4), rgb / 12.92)
+
+    # sRGB to XYZ (D65)
+    r = rgb_lin[..., 0]
+    g = rgb_lin[..., 1]
+    b = rgb_lin[..., 2]
+
+    x = r * 0.4124564 + g * 0.3575761 + b * 0.1804375
+    y = r * 0.2126729 + g * 0.7151522 + b * 0.0721750
+    z = r * 0.0193339 + g * 0.1191920 + b * 0.9503041
+
+    # Normalize for D65 white point
+    x = x / 0.95047
+    y = y / 1.00000
+    z = z / 1.08883
+
+    # XYZ to LAB
+    delta = 6.0 / 29.0
+    mask_x = x > (delta ** 3)
+    mask_y = y > (delta ** 3)
+    mask_z = z > (delta ** 3)
+
+    fx = torch.where(mask_x, torch.pow(torch.clamp(x, min=1e-6), 1.0 / 3.0), (x / (3.0 * delta ** 2)) + (4.0 / 29.0))
+    fy = torch.where(mask_y, torch.pow(torch.clamp(y, min=1e-6), 1.0 / 3.0), (y / (3.0 * delta ** 2)) + (4.0 / 29.0))
+    fz = torch.where(mask_z, torch.pow(torch.clamp(z, min=1e-6), 1.0 / 3.0), (z / (3.0 * delta ** 2)) + (4.0 / 29.0))
+
+    L = 116.0 * fy - 16.0
+    a = 500.0 * (fx - fy)
+    b_val = 200.0 * (fy - fz)
+
+    return torch.stack([L, a, b_val], dim=-1)
+
+
+def lab_to_rgb(lab: torch.Tensor) -> torch.Tensor:
+    """
+    Converts CIE-LAB tensor [..., 3] to RGB with values in [0, 1].
+    """
+    L = lab[..., 0]
+    a = lab[..., 1]
+    b_val = lab[..., 2]
+
+    fy = (L + 16.0) / 116.0
+    fx = (a / 500.0) + fy
+    fz = fy - (b_val / 200.0)
+
+    delta = 6.0 / 29.0
+    mask_x = fx > delta
+    mask_y = fy > delta
+    mask_z = fz > delta
+
+    x = torch.where(mask_x, torch.pow(fx, 3.0), 3.0 * (delta ** 2) * (fx - 4.0 / 29.0)) * 0.95047
+    y = torch.where(mask_y, torch.pow(fy, 3.0), 3.0 * (delta ** 2) * (fy - 4.0 / 29.0)) * 1.00000
+    z = torch.where(mask_z, torch.pow(fz, 3.0), 3.0 * (delta ** 2) * (fz - 4.0 / 29.0)) * 1.08883
+
+    # XYZ to linear sRGB
+    r_lin = x * 3.2404542 - y * 1.5371385 - z * 0.4985314
+    g_lin = -x * 0.9692660 + y * 1.8760108 + z * 0.0415560
+    b_lin = x * 0.0556434 - y * 0.2040259 + z * 1.0572252
+
+    # Linear to sRGB gamma
+    r_lin = torch.clamp(r_lin, min=0.0)
+    g_lin = torch.clamp(g_lin, min=0.0)
+    b_lin = torch.clamp(b_lin, min=0.0)
+
+    mask_r = r_lin > 0.0031308
+    mask_g = g_lin > 0.0031308
+    mask_b = b_lin > 0.0031308
+
+    r = torch.where(mask_r, 1.055 * torch.pow(r_lin, 1.0 / 2.4) - 0.055, 12.92 * r_lin)
+    g = torch.where(mask_g, 1.055 * torch.pow(g_lin, 1.0 / 2.4) - 0.055, 12.92 * g_lin)
+    b = torch.where(mask_b, 1.055 * torch.pow(b_lin, 1.0 / 2.4) - 0.055, 12.92 * b_lin)
+
+    rgb = torch.stack([r, g, b], dim=-1)
+    return torch.clamp(rgb, 0.0, 1.0)
+
+
+class AIMZ_VAEColorMatch:
+    """
+    Robust VAE Color Matcher and Drift Corrector for Video and Image Pipelines.
+    Fixes VAE decode color degradation (washed-out tones, green/yellow tints, gamma drift)
+    by transferring original color distribution statistics (LAB / Luminance Zones / RGB moments).
+    100% immune to frame-count mismatches (e.g. MiniMax 243 vs LTX 241 frames) and resolution differences!
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "original_image": ("IMAGE", {"tooltip": "Reference original image/video (before VAE decode / 1st pass)"}),
+                "processed_image": ("IMAGE", {"tooltip": "Upscaled or VAE-decoded image/video with color shift to be corrected"}),
+                "strength": ("FLOAT", {"default": 0.85, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Correction strength (0.0 = no change, 1.0 = full color match)"}),
+                "method": (["lab_moments (Reinhard)", "luminance_zones", "rgb_moments"], {"default": "lab_moments (Reinhard)", "tooltip": "Color matching algorithm:\n• lab_moments: Best perceptual color and tone transfer\n• luminance_zones: Preserves local lighting while correcting tints\n• rgb_moments: Fast global RGB channel match"}),
+            },
+            "optional": {
+                "mask": ("MASK", {"tooltip": "Optional mask to limit correction areas"}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("corrected_image",)
+    FUNCTION = "match_colors"
+    CATEGORY = "AIMZ/Color"
+
+    def match_colors(self, original_image, processed_image, strength=0.85, method="lab_moments (Reinhard)", mask=None):
+        if original_image is None or processed_image is None:
+            return (processed_image if processed_image is not None else original_image,)
+
+        if strength <= 0.001:
+            return (processed_image,)
+
+        orig = original_image
+        proc = processed_image
+
+        device = proc.device
+        dtype = proc.dtype
+        orig = orig.to(device=device, dtype=dtype)
+
+        # Batch frame count safety: handle frame mismatch (e.g., 243 vs 241 frames)
+        proc_b, proc_h, proc_w, _ = proc.shape
+        orig_b, orig_h, orig_w, _ = orig.shape
+
+        corrected_frames = []
+
+        for i in range(proc_b):
+            # Safe index mapping: clamp or loop safely to original frame index
+            orig_idx = min(i, orig_b - 1)
+            
+            orig_f = orig[orig_idx:orig_idx+1] # [1, H1, W1, 3]
+            proc_f = proc[i:i+1]               # [1, H2, W2, 3]
+
+            if method == "lab_moments (Reinhard)":
+                # Convert both to LAB
+                orig_lab = rgb_to_lab(orig_f)
+                proc_lab = rgb_to_lab(proc_f)
+
+                # Compute mean and standard deviation per channel
+                orig_mean = orig_lab.mean(dim=(1, 2), keepdim=True)
+                orig_std = orig_lab.std(dim=(1, 2), keepdim=True) + 1e-6
+
+                proc_mean = proc_lab.mean(dim=(1, 2), keepdim=True)
+                proc_std = proc_lab.std(dim=(1, 2), keepdim=True) + 1e-6
+
+                # Transfer color distribution
+                matched_lab = (proc_lab - proc_mean) * (orig_std / proc_std) + orig_mean
+                # Blend with original LAB based on strength
+                blended_lab = proc_lab * (1.0 - strength) + matched_lab * strength
+                
+                res_rgb = lab_to_rgb(blended_lab)
+
+            elif method == "luminance_zones":
+                # Luminance zone matching (Shadows, Midtones, Highlights)
+                lum_orig = 0.299 * orig_f[..., 0:1] + 0.587 * orig_f[..., 1:2] + 0.114 * orig_f[..., 2:3]
+                lum_proc = 0.299 * proc_f[..., 0:1] + 0.587 * proc_f[..., 1:2] + 0.114 * proc_f[..., 2:3]
+
+                # Global bias
+                mean_orig = orig_f.mean(dim=(1, 2), keepdim=True)
+                mean_proc = proc_f.mean(dim=(1, 2), keepdim=True)
+                bias = mean_orig - mean_proc
+
+                # Apply bias compensated by luminance
+                matched_rgb = proc_f + bias
+                matched_rgb = torch.clamp(matched_rgb, 0.0, 1.0)
+                res_rgb = proc_f * (1.0 - strength) + matched_rgb * strength
+
+            else: # rgb_moments
+                orig_mean = orig_f.mean(dim=(1, 2), keepdim=True)
+                orig_std = orig_f.std(dim=(1, 2), keepdim=True) + 1e-6
+
+                proc_mean = proc_f.mean(dim=(1, 2), keepdim=True)
+                proc_std = proc_f.std(dim=(1, 2), keepdim=True) + 1e-6
+
+                matched_rgb = (proc_f - proc_mean) * (orig_std / proc_std) + orig_mean
+                matched_rgb = torch.clamp(matched_rgb, 0.0, 1.0)
+                res_rgb = proc_f * (1.0 - strength) + matched_rgb * strength
+
+            corrected_frames.append(res_rgb)
+
+        result_tensor = torch.cat(corrected_frames, dim=0)
+
+        # Apply optional mask if provided
+        if mask is not None:
+            m = mask.to(device=device, dtype=dtype)
+            if m.dim() == 2:
+                m = m.unsqueeze(0).unsqueeze(-1)
+            elif m.dim() == 3:
+                m = m.unsqueeze(-1)
+            
+            # Resize mask if spatial dimensions mismatch
+            if m.shape[1:3] != (proc_h, proc_w):
+                m_t = m.permute(0, 3, 1, 2)
+                m_t = F.interpolate(m_t, size=(proc_h, proc_w), mode="bilinear", align_corners=False)
+                m = m_t.permute(0, 2, 3, 1)
+
+            # Match mask batch size
+            if m.shape[0] < proc_b:
+                m = m.repeat(proc_b // m.shape[0] + 1, 1, 1, 1)[:proc_b]
+
+            result_tensor = proc * (1.0 - m) + result_tensor * m
+
+        return (result_tensor,)
 
 
 class AIMZ_AutoMultiplePad:
@@ -134,10 +343,8 @@ class AIMZ_AutoMultiplePad:
             if pad_w == 0 and pad_h == 0:
                 padded_image = image
             else:
-                # [B, H, W, C] -> [B, C, H, W]
                 img_t = image.permute(0, 3, 1, 2)
                 
-                # Check for reflect padding constraint (padding cannot exceed dimension size)
                 current_mode = pad_mode
                 if current_mode == "reflect":
                     if pad_left >= w or pad_right >= w or pad_top >= h or pad_bottom >= h:
@@ -145,11 +352,8 @@ class AIMZ_AutoMultiplePad:
 
                 if current_mode == "constant":
                     r, g, b = parse_color(pad_color)
-                    # Constant padding in PyTorch accepts single scalar value for N-D tensors
-                    # For multi-channel RGB, pad with 0 then fill borders
                     img_padded = F.pad(img_t, (pad_left, pad_right, pad_top, pad_bottom), mode="constant", value=0.0)
                     if r != 0.0 or g != 0.0 or b != 0.0:
-                        # Colorize padded region
                         color_tensor = torch.tensor([r, g, b], device=img_t.device, dtype=img_t.dtype).view(1, 3, 1, 1)
                         mask_border = torch.ones_like(img_padded)
                         if pad_top > 0: mask_border[:, :, :pad_top, :] = 0
@@ -169,9 +373,9 @@ class AIMZ_AutoMultiplePad:
             else:
                 m = mask
                 if m.dim() == 2:
-                    m = m.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
+                    m = m.unsqueeze(0).unsqueeze(0)
                 elif m.dim() == 3:
-                    m = m.unsqueeze(1)  # [B, 1, H, W]
+                    m = m.unsqueeze(1)
                 
                 mask_mode = pad_mode if pad_mode in ["reflect", "replicate", "circular"] else "constant"
                 if mask_mode == "reflect" and (pad_left >= w or pad_right >= w or pad_top >= h or pad_bottom >= h):
@@ -280,15 +484,12 @@ class AIMZ_FreezeFramePad:
             return (None, 0)
 
         chunks = []
-        # Prepend start frames (replicate first frame)
         if pad_start_frames > 0:
             first_frame = image[0:1].repeat(pad_start_frames, 1, 1, 1)
             chunks.append(first_frame)
         
-        # Original video frames
         chunks.append(image)
 
-        # Append end frames (replicate last frame)
         if pad_end_frames > 0:
             last_frame = image[-1:].repeat(pad_end_frames, 1, 1, 1)
             chunks.append(last_frame)
@@ -333,20 +534,17 @@ class AIMZ_AudioSilencePad:
         if waveform is None or not isinstance(waveform, torch.Tensor) or waveform.numel() == 0:
             return (None, 0.0, 0.0, 0.0)
 
-        # Determine effective FPS
         if source_fps is not None and isinstance(source_fps, (int, float)) and source_fps > 0:
             fps = float(source_fps)
         else:
             fps = float(default_fps) if default_fps > 0 else 24.0
 
-        # Calculate exact padding seconds and sample counts
         start_sec = (pad_start_frames / fps) if pad_start_frames > 0 else 0.0
         end_sec = (pad_end_frames / fps) if pad_end_frames > 0 else 0.0
 
         num_start_samples = int(round(start_sec * sample_rate))
         num_end_samples = int(round(end_sec * sample_rate))
 
-        # Waveform tensor shape: [Batch, Channels, Samples] or [Channels, Samples]
         shape_prefix = list(waveform.shape[:-1])
         
         chunks = []
@@ -528,27 +726,21 @@ class AIMZ_VideoDurationSelector:
     CATEGORY = "AIMZ/Workflow"
 
     def calculate_duration(self, mode="Source Video (V2V)", custom_seconds=6.0, default_fps=24.0, minimax_align=True, source_duration=None, source_fps=None):
-        # 1. Determine Effective FPS
         if source_fps is not None and isinstance(source_fps, (int, float)) and source_fps > 0:
             effective_fps = float(source_fps)
         else:
             effective_fps = float(default_fps) if default_fps > 0 else 24.0
 
-        # 2. Determine Effective Duration (Seconds) based strictly on Mode
         if mode == "Source Video (V2V)":
             if source_duration is not None and isinstance(source_duration, (int, float)) and source_duration > 0:
                 effective_sec = float(source_duration)
             else:
-                # When in V2V mode and no source video duration is provided (or 0.0), return 0
                 return (0, 0.0, effective_fps, 0)
         else:
-            # Custom Seconds (R2V) Mode
             effective_sec = float(custom_seconds)
 
-        # 3. Calculate Raw Frame Count
         raw_frames = max(5, int(round(effective_sec * effective_fps)))
 
-        # 4. MiniMax H3 Alignment Formula: max(5, round(a * fps)) + (5 - (max(5, round(a * fps)) % 17)) % 17
         if minimax_align:
             remainder = raw_frames % 17
             pad = (5 - remainder) % 17
@@ -556,7 +748,6 @@ class AIMZ_VideoDurationSelector:
         else:
             total_frames = raw_frames
 
-        # 5. Calculate Exact Final Seconds
         final_seconds = round(total_frames / effective_fps, 3)
 
         return (total_frames, final_seconds, effective_fps, raw_frames)
