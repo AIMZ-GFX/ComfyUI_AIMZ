@@ -7,18 +7,26 @@ import torch
 import torch.nn.functional as F
 
 try:
+    import cv2
+    ADVANCED_CV2_AVAILABLE = True
+except ImportError:
+    ADVANCED_CV2_AVAILABLE = False
+
+try:
+    from sklearn.cluster import KMeans
+    from skimage import exposure
+    ADVANCED_SKLEARN_AVAILABLE = True
+except ImportError:
+    ADVANCED_SKLEARN_AVAILABLE = False
+
+try:
     import folder_paths
 except ImportError:
     folder_paths = None
 
 def parse_color(color_str):
-    """
-    Parses color string (e.g. '0,0,0', '1,1,1', '255,255,255', 'black', 'white', '#ffffff')
-    into normalized RGB float tuple (r, g, b) in [0.0, 1.0].
-    """
     if not color_str:
         return (1.0, 1.0, 1.0)
-    
     color_str = color_str.strip().lower()
     named_colors = {
         "black": (0.0, 0.0, 0.0),
@@ -31,7 +39,6 @@ def parse_color(color_str):
     }
     if color_str in named_colors:
         return named_colors[color_str]
-    
     if color_str.startswith("#"):
         hex_val = color_str.lstrip("#")
         if len(hex_val) == 6:
@@ -39,7 +46,6 @@ def parse_color(color_str):
             g = int(hex_val[2:4], 16) / 255.0
             b = int(hex_val[4:6], 16) / 255.0
             return (r, g, b)
-    
     parts = [p.strip() for p in color_str.split(",") if p.strip()]
     if len(parts) >= 3:
         try:
@@ -51,217 +57,354 @@ def parse_color(color_str):
                     max(0.0, min(1.0, vals[2])))
         except ValueError:
             pass
-            
     return (1.0, 1.0, 1.0)
 
 
 # -------------------------------------------------------------
-# Color Space Conversion Helper Functions (Pure PyTorch)
+# 1:1 Direct Port of VAEColorCorrector Algorithms from EasyColorCorrector
 # -------------------------------------------------------------
-def rgb_to_lab(rgb: torch.Tensor) -> torch.Tensor:
-    """
-    Converts RGB tensor [..., 3] with values in [0, 1] to CIE-LAB.
-    """
-    mask = rgb > 0.04045
-    rgb_lin = torch.where(mask, torch.pow((rgb + 0.055) / 1.055, 2.4), rgb / 12.92)
+def _safe_clamp_colors(image_np, preserve_gradients=True):
+    if preserve_gradients:
+        image_float = image_np.astype(np.float32)
+        below_zero = image_float < 0
+        above_255 = image_float > 255
+        if np.any(below_zero):
+            negative_values = image_float[below_zero]
+            image_float[below_zero] = -5 * np.log(1 + np.exp(-negative_values / 5))
+        if np.any(above_255):
+            high_values = image_float[above_255]
+            image_float[above_255] = 255 + 5 * np.log(1 + np.exp((high_values - 255) / 5))
+        return np.clip(image_float, 0, 255).astype(np.uint8)
+    else:
+        return np.clip(image_np, 0, 255).astype(np.uint8)
 
-    r = rgb_lin[..., 0]
-    g = rgb_lin[..., 1]
-    b = rgb_lin[..., 2]
-
-    x = r * 0.4124564 + g * 0.3575761 + b * 0.1804375
-    y = r * 0.2126729 + g * 0.7151522 + b * 0.0721750
-    z = r * 0.0193339 + g * 0.1191920 + b * 0.9503041
-
-    x = x / 0.95047
-    y = y / 1.00000
-    z = z / 1.08883
-
-    delta = 6.0 / 29.0
-    mask_x = x > (delta ** 3)
-    mask_y = y > (delta ** 3)
-    mask_z = z > (delta ** 3)
-
-    fx = torch.where(mask_x, torch.pow(torch.clamp(x, min=1e-6), 1.0 / 3.0), (x / (3.0 * delta ** 2)) + (4.0 / 29.0))
-    fy = torch.where(mask_y, torch.pow(torch.clamp(y, min=1e-6), 1.0 / 3.0), (y / (3.0 * delta ** 2)) + (4.0 / 29.0))
-    fz = torch.where(mask_z, torch.pow(torch.clamp(z, min=1e-6), 1.0 / 3.0), (z / (3.0 * delta ** 2)) + (4.0 / 29.0))
-
-    L = 116.0 * fy - 16.0
-    a = 500.0 * (fx - fy)
-    b_val = 200.0 * (fy - fz)
-
-    return torch.stack([L, a, b_val], dim=-1)
-
-
-def lab_to_rgb(lab: torch.Tensor) -> torch.Tensor:
-    """
-    Converts CIE-LAB tensor [..., 3] to RGB with values in [0, 1].
-    """
-    L = lab[..., 0]
-    a = lab[..., 1]
-    b_val = lab[..., 2]
-
-    fy = (L + 16.0) / 116.0
-    fx = (a / 500.0) + fy
-    fz = fy - (b_val / 200.0)
-
-    delta = 6.0 / 29.0
-    mask_x = fx > delta
-    mask_y = fy > delta
-    mask_z = fz > delta
-
-    x = torch.where(mask_x, torch.pow(fx, 3.0), 3.0 * (delta ** 2) * (fx - 4.0 / 29.0)) * 0.95047
-    y = torch.where(mask_y, torch.pow(fy, 3.0), 3.0 * (delta ** 2) * (fy - 4.0 / 29.0)) * 1.00000
-    z = torch.where(mask_z, torch.pow(fz, 3.0), 3.0 * (delta ** 2) * (fz - 4.0 / 29.0)) * 1.08883
-
-    r_lin = x * 3.2404542 - y * 1.5371385 - z * 0.4985314
-    g_lin = -x * 0.9692660 + y * 1.8760108 + z * 0.0415560
-    b_lin = x * 0.0556434 - y * 0.2040259 + z * 1.0572252
-
-    r_lin = torch.clamp(r_lin, min=0.0)
-    g_lin = torch.clamp(g_lin, min=0.0)
-    b_lin = torch.clamp(b_lin, min=0.0)
-
-    mask_r = r_lin > 0.0031308
-    mask_g = g_lin > 0.0031308
-    mask_b = b_lin > 0.0031308
-
-    r = torch.where(mask_r, 1.055 * torch.pow(r_lin, 1.0 / 2.4) - 0.055, 12.92 * r_lin)
-    g = torch.where(mask_g, 1.055 * torch.pow(g_lin, 1.0 / 2.4) - 0.055, 12.92 * g_lin)
-    b = torch.where(mask_b, 1.055 * torch.pow(b_lin, 1.0 / 2.4) - 0.055, 12.92 * b_lin)
-
-    rgb = torch.stack([r, g, b], dim=-1)
-    return torch.clamp(rgb, 0.0, 1.0)
+def _match_to_reference_colors(processed_np, original_np, strength=0.8):
+    proc_float = processed_np.astype(np.float32)
+    orig_float = original_np.astype(np.float32)
+    mean_orig = np.mean(orig_float, axis=(0, 1), keepdims=True)
+    mean_proc = np.mean(proc_float, axis=(0, 1), keepdims=True)
+    std_orig = np.std(orig_float, axis=(0, 1), keepdims=True) + 1e-6
+    std_proc = np.std(proc_float, axis=(0, 1), keepdims=True) + 1e-6
+    normalized = (proc_float - mean_proc) / std_proc
+    rescaled = normalized * std_orig + mean_orig
+    matched = proc_float * (1.0 - strength) + rescaled * strength
+    return _safe_clamp_colors(matched, preserve_gradients=True)
 
 
 class AIMZ_VAEColorMatch:
     """
-    Robust VAE Color Matcher and Drift Corrector for Video and Image Pipelines.
-    Dual Mode Support:
-    1. Standalone Post-Processor: Put after VAEDecode (connect original_image + processed_image).
-    2. All-in-One VAE Decoder: Connect original_image + samples (LATENT) + vae (VAE) to decode and match colors in 1 step!
-    100% immune to frame-count mismatches (e.g. MiniMax 243 vs LTX 241 frames) and resolution differences!
+    1:1 Exact Port of VAEColorCorrector (EasyColorCorrector) with full batch/frame mismatch safety,
+    resolution auto-scaling, and pure PyTorch/NumPy backend support.
     """
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "original_image": ("IMAGE", {"tooltip": "Reference original image/video (before VAE decode / 1st pass)"}),
-                "strength": ("FLOAT", {"default": 0.85, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Correction strength (0.0 = no change, 1.0 = full color match)"}),
-                "method": (["lab_moments (Reinhard)", "luminance_zones", "rgb_moments"], {"default": "lab_moments (Reinhard)", "tooltip": "Color matching algorithm:\n• lab_moments: Best perceptual color and tone transfer\n• luminance_zones: Preserves local lighting while correcting tints\n• rgb_moments: Fast global RGB channel match"}),
+                "original_image": ("IMAGE", {"tooltip": "Original reference image/video (before VAE decode / 1st pass)"}),
+                "processed_image": ("IMAGE", {"tooltip": "Image/video after VAE decode with color shifts"}),
+                "correction_strength": ("FLOAT", {"default": 0.85, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Correction strength (0.0 = no change, 1.0 = full color match)"}),
+                "method": (
+                    ["advanced_3d_lut", "luminance_zones", "histogram_matching", "statistical_matching"], 
+                    {"default": "advanced_3d_lut", "tooltip": "Color correction method from VAEColorCorrector"}
+                ),
+                "auto_preserve": ("BOOLEAN", {"default": False, "tooltip": "Auto-detect and preserve changed/inpainted areas (set False to correct entire full frame)"}),
             },
             "optional": {
-                "processed_image": ("IMAGE", {"tooltip": "Option A: Connect image from VAEDecode"}),
-                "samples": ("LATENT", {"tooltip": "Option B: Connect Latent directly (auto-decodes if vae is connected!)"}),
-                "vae": ("VAE", {"tooltip": "Option B: Connect VAE model to decode samples automatically"}),
-                "mask": ("MASK", {"tooltip": "Optional mask to limit correction areas"}),
+                "vae": ("VAE", {"tooltip": "Optional VAE model input for pipeline consistency"}),
+                "mask": ("MASK", {"tooltip": "Optional mask - white areas will be preserved"}),
+                "edge_feather": ("INT", {"default": 5, "min": 0, "max": 50, "step": 1, "tooltip": "Feather edges between corrected/preserved areas"}),
             }
         }
 
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("corrected_image",)
-    FUNCTION = "match_colors"
+    FUNCTION = "correct_vae_colors"
     CATEGORY = "AIMZ/Color"
 
-    def match_colors(self, original_image, strength=0.85, method="lab_moments (Reinhard)", processed_image=None, samples=None, vae=None, mask=None):
-        proc = processed_image
+    def correct_vae_colors(
+        self, original_image, processed_image, correction_strength=0.85, 
+        method="advanced_3d_lut", auto_preserve=False, vae=None, mask=None, edge_feather=5
+    ):
+        if original_image is None or processed_image is None:
+            return (processed_image if processed_image is not None else original_image,)
 
-        # Auto-Decode if samples (LATENT) and vae are provided instead of processed_image
-        if proc is None and samples is not None and vae is not None:
-            latent_tensor = samples.get("samples")
-            if latent_tensor is not None:
-                proc = vae.decode(latent_tensor)
+        if correction_strength <= 0.001:
+            return (processed_image,)
 
-        if original_image is None or proc is None:
-            return (proc if proc is not None else original_image,)
+        device = processed_image.device
+        
+        orig_b, orig_h, orig_w, _ = original_image.shape
+        proc_b, proc_h, proc_w, _ = processed_image.shape
 
-        if strength <= 0.001:
-            return (proc,)
+        # Match spatial resolution if different
+        if (orig_h, orig_w) != (proc_h, proc_w):
+            print(f"⚠️ Resolution mismatch: resizing original {orig_w}x{orig_h} to match processed {proc_w}x{proc_h}")
+            orig_scaled = F.interpolate(
+                original_image.permute(0, 3, 1, 2),
+                size=(proc_h, proc_w),
+                mode="bilinear",
+                align_corners=False
+            ).permute(0, 2, 3, 1)
+        else:
+            orig_scaled = original_image
 
-        orig = original_image
-        device = proc.device
-        dtype = proc.dtype
-        orig = orig.to(device=device, dtype=dtype)
+        corrected_batch = []
 
-        # Batch frame count safety: handle frame mismatch (e.g., 243 vs 241 frames)
-        proc_b, proc_h, proc_w, _ = proc.shape
-        orig_b, orig_h, orig_w, _ = orig.shape
-
-        corrected_frames = []
-
+        # Process each frame in processed_image safely
         for i in range(proc_b):
-            # Safe index mapping: clamp safely to original frame index
             orig_idx = min(i, orig_b - 1)
-            
-            orig_f = orig[orig_idx:orig_idx+1]
-            proc_f = proc[i:i+1]
+            orig_img = orig_scaled[orig_idx]
+            proc_img = processed_image[i]
+            current_mask = mask[i] if (mask is not None and i < mask.shape[0]) else (mask[0] if mask is not None else None)
 
-            if method == "lab_moments (Reinhard)":
-                orig_lab = rgb_to_lab(orig_f)
-                proc_lab = rgb_to_lab(proc_f)
+            # Convert to numpy uint8
+            orig_np = (orig_img.cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
+            proc_np = (proc_img.cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
 
-                orig_mean = orig_lab.mean(dim=(1, 2), keepdim=True)
-                orig_std = orig_lab.std(dim=(1, 2), keepdim=True) + 1e-6
+            # 1. Analyze VAE Characteristics
+            vae_adjustment = 1.0
+            vae_color_bias = None
+            if vae is not None:
+                vae_adjustment, vae_color_bias = self._analyze_vae_characteristics(orig_np, proc_np)
 
-                proc_mean = proc_lab.mean(dim=(1, 2), keepdim=True)
-                proc_std = proc_lab.std(dim=(1, 2), keepdim=True) + 1e-6
+            # 2. Balance Strength
+            adj_strength = self._balance_correction_strength(method, correction_strength) * vae_adjustment
+            adj_strength = min(1.0, max(0.0, adj_strength))
 
-                matched_lab = (proc_lab - proc_mean) * (orig_std / proc_std) + orig_mean
-                blended_lab = proc_lab * (1.0 - strength) + matched_lab * strength
-                
-                res_rgb = lab_to_rgb(blended_lab)
-
+            # 3. Apply Method
+            if method == "advanced_3d_lut":
+                corrected_np = self._advanced_3d_lut_correction(orig_np, proc_np, adj_strength, vae_color_bias)
             elif method == "luminance_zones":
-                mean_orig = orig_f.mean(dim=(1, 2), keepdim=True)
-                mean_proc = proc_f.mean(dim=(1, 2), keepdim=True)
-                bias = mean_orig - mean_proc
+                if vae_color_bias is not None:
+                    corrected_np = self._vae_aware_luminance_correction(proc_np, orig_np, adj_strength, vae_color_bias)
+                else:
+                    corrected_np = _match_to_reference_colors(proc_np, orig_np, adj_strength)
+            elif method == "histogram_matching":
+                corrected_np = self._histogram_matching_correction(orig_np, proc_np, adj_strength, vae_color_bias)
+            else: # statistical_matching
+                corrected_np = self._statistical_matching_correction(orig_np, proc_np, adj_strength, vae_color_bias)
 
-                matched_rgb = proc_f + bias
-                matched_rgb = torch.clamp(matched_rgb, 0.0, 1.0)
-                res_rgb = proc_f * (1.0 - strength) + matched_rgb * strength
+            corrected_tensor = torch.from_numpy(corrected_np.astype(np.float32) / 255.0).to(device)
 
-            else: # rgb_moments
-                orig_mean = orig_f.mean(dim=(1, 2), keepdim=True)
-                orig_std = orig_f.std(dim=(1, 2), keepdim=True) + 1e-6
+            # 4. Handle Mask / Auto-preserve
+            if current_mask is not None:
+                corrected_tensor = self._apply_mask_preservation(proc_img, corrected_tensor, current_mask, edge_feather, device)
+            elif auto_preserve:
+                corrected_tensor = self._auto_preserve_inpainted(orig_img, proc_img, corrected_tensor, edge_feather, device)
 
-                proc_mean = proc_f.mean(dim=(1, 2), keepdim=True)
-                proc_std = proc_f.std(dim=(1, 2), keepdim=True) + 1e-6
+            corrected_batch.append(corrected_tensor)
 
-                matched_rgb = (proc_f - proc_mean) * (orig_std / proc_std) + orig_mean
-                matched_rgb = torch.clamp(matched_rgb, 0.0, 1.0)
-                res_rgb = proc_f * (1.0 - strength) + matched_rgb * strength
+        result = torch.stack(corrected_batch, dim=0)
+        return (result,)
 
-            corrected_frames.append(res_rgb)
+    def _analyze_vae_characteristics(self, original_np, processed_np):
+        try:
+            orig_float = original_np.astype(np.float32)
+            proc_float = processed_np.astype(np.float32)
+            gray_orig = np.mean(orig_float, axis=2)
 
-        result_tensor = torch.cat(corrected_frames, dim=0)
+            shadows_mask = gray_orig < 85
+            midtones_mask = (gray_orig >= 85) & (gray_orig <= 170)
+            highlights_mask = gray_orig > 170
 
-        # Apply optional mask if provided
-        if mask is not None:
-            m = mask.to(device=device, dtype=dtype)
-            if m.dim() == 2:
-                m = m.unsqueeze(0).unsqueeze(-1)
-            elif m.dim() == 3:
-                m = m.unsqueeze(-1)
-            
-            if m.shape[1:3] != (proc_h, proc_w):
-                m_t = m.permute(0, 3, 1, 2)
-                m_t = F.interpolate(m_t, size=(proc_h, proc_w), mode="bilinear", align_corners=False)
-                m = m_t.permute(0, 2, 3, 1)
+            vae_bias = {}
+            for zone_name, mask in [("shadows", shadows_mask), ("midtones", midtones_mask), ("highlights", highlights_mask)]:
+                if np.sum(mask) > 100:
+                    orig_zone = orig_float[mask]
+                    proc_zone = proc_float[mask]
+                    bias_r = np.mean(proc_zone[:, 0]) - np.mean(orig_zone[:, 0])
+                    bias_g = np.mean(proc_zone[:, 1]) - np.mean(orig_zone[:, 1])
+                    bias_b = np.mean(proc_zone[:, 2]) - np.mean(orig_zone[:, 2])
+                    vae_bias[zone_name] = np.array([bias_r, bias_g, bias_b])
+                else:
+                    vae_bias[zone_name] = np.array([0.0, 0.0, 0.0])
 
-            if m.shape[0] < proc_b:
-                m = m.repeat(proc_b // m.shape[0] + 1, 1, 1, 1)[:proc_b]
+            total_bias = np.mean([np.abs(bias).sum() for bias in vae_bias.values()])
+            if total_bias > 15:
+                vae_adjustment = 0.85
+            elif total_bias > 8:
+                vae_adjustment = 0.92
+            else:
+                vae_adjustment = 0.98
 
-            result_tensor = proc * (1.0 - m) + result_tensor * m
+            return vae_adjustment, vae_bias
+        except Exception:
+            return 0.9, None
 
-        return (result_tensor,)
+    def _balance_correction_strength(self, method, strength):
+        if method == "luminance_zones":
+            return strength
+        elif method == "histogram_matching":
+            return strength * 0.85
+        elif method == "statistical_matching":
+            return min(1.0, strength * 1.15)
+        elif method == "advanced_3d_lut":
+            return strength * 0.7
+        return strength
+
+    def _advanced_3d_lut_correction(self, original_np, processed_np, strength, vae_color_bias=None):
+        if not ADVANCED_SKLEARN_AVAILABLE:
+            return _match_to_reference_colors(processed_np, original_np, strength)
+        try:
+            orig_samples = original_np[::4, ::4].reshape(-1, 3)
+            proc_samples = processed_np[::4, ::4].reshape(-1, 3)
+            n_clusters = min(64, max(8, len(orig_samples) // 10))
+
+            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+            proc_clusters = kmeans.fit_predict(proc_samples)
+            proc_centers = kmeans.cluster_centers_
+
+            orig_centers = np.zeros_like(proc_centers)
+            for i in range(n_clusters):
+                cluster_mask = proc_clusters == i
+                if np.sum(cluster_mask) > 0:
+                    orig_centers[i] = np.mean(orig_samples[cluster_mask], axis=0)
+                else:
+                    orig_centers[i] = proc_centers[i]
+
+            proc_flat = processed_np.reshape(-1, 3).astype(np.float32)
+            distances = np.linalg.norm(proc_flat[:, np.newaxis, :] - proc_centers[np.newaxis, :, :], axis=2)
+            closest_clusters = np.argmin(distances, axis=1)
+
+            min_distances = np.min(distances, axis=1)
+            max_distance = np.percentile(min_distances, 90) + 1e-6
+
+            for i in range(n_clusters):
+                cluster_mask = closest_clusters == i
+                if np.sum(cluster_mask) > 0:
+                    color_shift = orig_centers[i] - proc_centers[i]
+                    if vae_color_bias is not None:
+                        cluster_luminance = np.mean(proc_centers[i])
+                        if cluster_luminance < 85:
+                            zone_bias = vae_color_bias.get("shadows", np.array([0.0, 0.0, 0.0]))
+                        elif cluster_luminance <= 170:
+                            zone_bias = vae_color_bias.get("midtones", np.array([0.0, 0.0, 0.0]))
+                        else:
+                            zone_bias = vae_color_bias.get("highlights", np.array([0.0, 0.0, 0.0]))
+                        color_shift -= zone_bias * 0.5
+
+                    cluster_distances = min_distances[cluster_mask]
+                    distance_weights = np.clip(1.0 - cluster_distances / max_distance, 0.1, 1.0)
+                    for c in range(3):
+                        shift_amount = color_shift[c] * strength * distance_weights
+                        shift_amount = np.clip(shift_amount, -50, 50)
+                        proc_flat[cluster_mask, c] += shift_amount
+
+            corrected_np = proc_flat.reshape(processed_np.shape)
+            return _safe_clamp_colors(corrected_np, preserve_gradients=True)
+        except Exception:
+            return _match_to_reference_colors(processed_np, original_np, strength)
+
+    def _vae_aware_luminance_correction(self, processed_np, original_np, strength, vae_color_bias):
+        try:
+            corrected_np = _match_to_reference_colors(processed_np, original_np, strength)
+            corrected_float = corrected_np.astype(np.float32)
+            gray = np.mean(corrected_float, axis=2)
+
+            shadows_mask = gray < 85
+            midtones_mask = (gray >= 85) & (gray <= 170)
+            highlights_mask = gray > 170
+            bias_strength = strength * 0.3
+
+            for zone_name, mask in [("shadows", shadows_mask), ("midtones", midtones_mask), ("highlights", highlights_mask)]:
+                if zone_name in vae_color_bias and np.sum(mask) > 0:
+                    bias = vae_color_bias[zone_name]
+                    for c in range(3):
+                        bias_correction = np.clip(bias[c] * bias_strength, -30, 30)
+                        corrected_float[mask, c] -= bias_correction
+
+            return _safe_clamp_colors(corrected_float, preserve_gradients=True)
+        except Exception:
+            return _match_to_reference_colors(processed_np, original_np, strength)
+
+    def _histogram_matching_correction(self, original_np, processed_np, strength, vae_color_bias=None):
+        if not ADVANCED_SKLEARN_AVAILABLE:
+            return _match_to_reference_colors(processed_np, original_np, strength)
+        try:
+            corrected_np = processed_np.astype(np.float32)
+            original_float = original_np.astype(np.float32)
+            for c in range(3):
+                matched_channel = exposure.match_histograms(corrected_np[:, :, c], original_float[:, :, c])
+                corrected_np[:, :, c] = processed_np[:, :, c] * (1 - strength) + matched_channel * strength
+
+            if vae_color_bias is not None:
+                gray = np.mean(corrected_np, axis=2)
+                bias_strength = strength * 0.2
+                shadows_mask = gray < 85
+                midtones_mask = (gray >= 85) & (gray <= 170)
+                highlights_mask = gray > 170
+                for zone_name, mask in [("shadows", shadows_mask), ("midtones", midtones_mask), ("highlights", highlights_mask)]:
+                    if zone_name in vae_color_bias and np.sum(mask) > 0:
+                        bias = vae_color_bias[zone_name]
+                        for c in range(3):
+                            bias_correction = np.clip(bias[c] * bias_strength, -30, 30)
+                            corrected_np[mask, c] -= bias_correction
+
+            return _safe_clamp_colors(corrected_np, preserve_gradients=True)
+        except Exception:
+            return _match_to_reference_colors(processed_np, original_np, strength)
+
+    def _statistical_matching_correction(self, original_np, processed_np, strength, vae_color_bias=None):
+        corrected_np = processed_np.astype(np.float32)
+        original_float = original_np.astype(np.float32)
+
+        for c in range(3):
+            proc_mean = np.mean(corrected_np[:, :, c])
+            proc_std = np.std(corrected_np[:, :, c])
+            orig_mean = np.mean(original_float[:, :, c])
+            orig_std = np.std(original_float[:, :, c])
+
+            if proc_std > 0:
+                normalized = (corrected_np[:, :, c] - proc_mean) / proc_std
+                rescaled = normalized * orig_std + orig_mean
+                corrected_np[:, :, c] = corrected_np[:, :, c] * (1 - strength) + rescaled * strength
+
+        if vae_color_bias is not None:
+            gray = np.mean(corrected_np, axis=2)
+            bias_strength = strength * 0.25
+            shadows_mask = gray < 85
+            midtones_mask = (gray >= 85) & (gray <= 170)
+            highlights_mask = gray > 170
+            for zone_name, mask in [("shadows", shadows_mask), ("midtones", midtones_mask), ("highlights", highlights_mask)]:
+                if zone_name in vae_color_bias and np.sum(mask) > 0:
+                    bias = vae_color_bias[zone_name]
+                    for c in range(3):
+                        bias_correction = np.clip(bias[c] * bias_strength, -30, 30)
+                        corrected_np[mask, c] -= bias_correction
+
+        return _safe_clamp_colors(corrected_np, preserve_gradients=True)
+
+    def _apply_mask_preservation(self, processed_img, corrected_img, mask, edge_feather, device):
+        correction_mask = 1.0 - mask.to(device)
+        if edge_feather > 0 and ADVANCED_CV2_AVAILABLE:
+            correction_mask_np = correction_mask.cpu().numpy()
+            correction_mask_np = cv2.GaussianBlur(
+                correction_mask_np, (edge_feather * 2 + 1, edge_feather * 2 + 1), edge_feather / 3
+            )
+            correction_mask = torch.from_numpy(correction_mask_np).to(device)
+        correction_mask = correction_mask.unsqueeze(-1)
+        return processed_img * (1 - correction_mask) + corrected_img * correction_mask
+
+    def _auto_preserve_inpainted(self, original_img, processed_img, corrected_img, edge_feather, device):
+        diff = torch.abs(original_img - processed_img)
+        diff_magnitude = torch.mean(diff, dim=-1)
+        threshold = torch.quantile(diff_magnitude, 0.7)
+        inpainted_mask = (diff_magnitude > threshold).float()
+        correction_mask = 1.0 - inpainted_mask
+        if edge_feather > 0 and ADVANCED_CV2_AVAILABLE:
+            correction_mask_np = correction_mask.cpu().numpy()
+            correction_mask_np = cv2.GaussianBlur(
+                correction_mask_np, (edge_feather * 2 + 1, edge_feather * 2 + 1), edge_feather / 3
+            )
+            correction_mask = torch.from_numpy(correction_mask_np).to(device)
+        correction_mask = correction_mask.unsqueeze(-1)
+        return processed_img * (1 - correction_mask) + corrected_img * correction_mask
 
 
+# -------------------------------------------------------------
+# Auto Multiple Pad / Unpad / Freeze Frame / Audio / Switch Nodes
+# -------------------------------------------------------------
 class AIMZ_AutoMultiplePad:
-    """
-    Automatically pads images/masks/video frames to be divisible by a given multiple (e.g. 32).
-    Outputs padded image, mask, original dimensions (width, height), frame count, padding offsets, and pad_info.
-    Completely safe against None inputs (returns None/0 without crashing for easy dynamic branching).
-    """
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -289,7 +432,6 @@ class AIMZ_AutoMultiplePad:
         pad_right = 0
         pad_top = 0
         pad_bottom = 0
-        
         padded_image = None
         padded_mask = None
         count = 0
@@ -330,11 +472,9 @@ class AIMZ_AutoMultiplePad:
                 padded_image = image
             else:
                 img_t = image.permute(0, 3, 1, 2)
-                
                 current_mode = pad_mode
-                if current_mode == "reflect":
-                    if pad_left >= w or pad_right >= w or pad_top >= h or pad_bottom >= h:
-                        current_mode = "replicate"
+                if current_mode == "reflect" and (pad_left >= w or pad_right >= w or pad_top >= h or pad_bottom >= h):
+                    current_mode = "replicate"
 
                 if current_mode == "constant":
                     r, g, b = parse_color(pad_color)
@@ -361,11 +501,9 @@ class AIMZ_AutoMultiplePad:
                     m = m.unsqueeze(0).unsqueeze(0)
                 elif m.dim() == 3:
                     m = m.unsqueeze(1)
-                
                 mask_mode = pad_mode if pad_mode in ["reflect", "replicate", "circular"] else "constant"
                 if mask_mode == "reflect" and (pad_left >= w or pad_right >= w or pad_top >= h or pad_bottom >= h):
                     mask_mode = "replicate"
-
                 m_padded = F.pad(m, (pad_left, pad_right, pad_top, pad_bottom), mode=mask_mode, value=0.0)
                 padded_mask = m_padded.squeeze(1)
 
@@ -373,9 +511,6 @@ class AIMZ_AutoMultiplePad:
 
 
 class AIMZ_AutoMultipleUnpad:
-    """
-    Restores padded images/masks back to their original dimensions using pad_info or manual coordinates.
-    """
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -436,17 +571,12 @@ class AIMZ_AutoMultipleUnpad:
 
 
 class AIMZ_FreezeFramePad:
-    """
-    Pads a video frame sequence with repeated freeze frames at the start and end.
-    Replaces 5 separate nodes (GetImageFromBatch x2, RepeatImages x2, ImageBatchMulti).
-    Completely safe against None inputs (returns None without crashing for optional video branches).
-    """
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "pad_start_frames": ("INT", {"default": 15, "min": 0, "max": 1000, "step": 1, "tooltip": "Number of freeze frames to prepend to the start of the video"}),
-                "pad_end_frames": ("INT", {"default": 15, "min": 0, "max": 1000, "step": 1, "tooltip": "Number of freeze frames to append to the end of the video"}),
+                "pad_start_frames": ("INT", {"default": 15, "min": 0, "max": 1000, "step": 1, "tooltip": "Number of freeze frames to prepend to the start"}),
+                "pad_end_frames": ("INT", {"default": 15, "min": 0, "max": 1000, "step": 1, "tooltip": "Number of freeze frames to append to the end"}),
             },
             "optional": {
                 "image": ("IMAGE", {"tooltip": "Input video frames [B, H, W, C]. If None, returns None without error."}),
@@ -461,7 +591,6 @@ class AIMZ_FreezeFramePad:
     def pad_frames(self, pad_start_frames=15, pad_end_frames=15, image=None):
         if image is None:
             return (None, 0)
-        
         try:
             if not isinstance(image, torch.Tensor) or image.dim() < 4 or image.shape[0] == 0:
                 return (None, 0)
@@ -472,9 +601,7 @@ class AIMZ_FreezeFramePad:
         if pad_start_frames > 0:
             first_frame = image[0:1].repeat(pad_start_frames, 1, 1, 1)
             chunks.append(first_frame)
-        
         chunks.append(image)
-
         if pad_end_frames > 0:
             last_frame = image[-1:].repeat(pad_end_frames, 1, 1, 1)
             chunks.append(last_frame)
@@ -484,12 +611,6 @@ class AIMZ_FreezeFramePad:
 
 
 class AIMZ_AudioSilencePad:
-    """
-    Pads an audio sequence with exact silence at the start and end based on video frame counts.
-    Replaces 8~10 separate nodes (Int x2, Math Expression x2, Empty Audio x2, Concatenate Audio x2).
-    Automatically matches sample rate and channel layout, and supports dynamic FPS override.
-    Completely safe against None inputs (returns None without crashing for optional audio branches).
-    """
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -531,14 +652,11 @@ class AIMZ_AudioSilencePad:
         num_end_samples = int(round(end_sec * sample_rate))
 
         shape_prefix = list(waveform.shape[:-1])
-        
         chunks = []
         if num_start_samples > 0:
             silence_start = torch.zeros(*shape_prefix, num_start_samples, dtype=waveform.dtype, device=waveform.device)
             chunks.append(silence_start)
-        
         chunks.append(waveform)
-
         if num_end_samples > 0:
             silence_end = torch.zeros(*shape_prefix, num_end_samples, dtype=waveform.dtype, device=waveform.device)
             chunks.append(silence_end)
@@ -555,13 +673,6 @@ class AIMZ_AudioSilencePad:
 
 
 class AIMZ_FallbackSwitch:
-    """
-    Universal Any-Type Fallback Switch (Coalesce).
-    Accepts ANY data type (IMAGE, AUDIO, LATENT, MODEL, CONDITIONING, etc.) like Get/Set nodes.
-    If 'primary' is not None, it passes 'primary'.
-    If 'primary' is None, it seamlessly outputs 'fallback'.
-    If both are None, cleanly returns None without error.
-    """
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -589,11 +700,6 @@ class AIMZ_FallbackSwitch:
 
 
 class AIMZ_PreviewImageNoneSafe:
-    """
-    A None-Safe Image Preview node.
-    If image is None, it cleanly skips without crashing.
-    If image exists, it saves a temp preview and outputs the image as pass-through.
-    """
     def __init__(self):
         if folder_paths is not None:
             self.output_dir = folder_paths.get_temp_directory()
@@ -632,7 +738,6 @@ class AIMZ_PreviewImageNoneSafe:
             return {"ui": {"images": []}, "result": (None,)}
 
         filename_prefix += self.prefix_append
-        
         if folder_paths is not None:
             full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(
                 filename_prefix, self.output_dir, images[0].shape[1], images[0].shape[0]
@@ -660,11 +765,6 @@ class AIMZ_PreviewImageNoneSafe:
 
 
 class AIMZ_SelectiveGroupBypasser:
-    """
-    Selectively manages and toggles bypass states for user-chosen groups only.
-    Unlike Fast Groups Bypasser which lists every group, this lets you curate
-    a clean list of specific groups to toggle Active / Bypass directly from the node.
-    """
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -685,11 +785,6 @@ class AIMZ_SelectiveGroupBypasser:
 
 
 class AIMZ_VideoDurationSelector:
-    """
-    Smart Video Duration and Frame Calculator for V2V and R2V pipelines.
-    - In Source Video (V2V) mode: strictly follows the source video duration (if 0.0 or not connected, outputs 0 frames).
-    - In Custom Seconds (R2V) mode: uses custom_seconds to calculate exact MiniMax H3 frames.
-    """
     @classmethod
     def INPUT_TYPES(s):
         return {
