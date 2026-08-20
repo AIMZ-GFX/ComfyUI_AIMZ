@@ -391,3 +391,63 @@ class AIMZ_SelectiveGroupBypasser:
 
     def passthrough(self, opt_connection=None):
         return (opt_connection,)
+
+
+class AIMZ_VideoDurationSelector:
+    """
+    Smart Video Duration and Frame Calculator for V2V and R2V pipelines.
+    Seamlessly switches between Source Video Duration (V2V) and Custom Seconds (R2V),
+    automatically calculates total frames using MiniMax H3 alignment formulas (17n + 5),
+    and supports dynamic FPS override from source video with safe fallback.
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "mode": (["Source Video (V2V)", "Custom Seconds (R2V)"], {"default": "Custom Seconds (R2V)"}),
+                "custom_seconds": ("FLOAT", {"default": 6.0, "min": 0.1, "max": 600.0, "step": 0.1, "round": 0.01, "tooltip": "Desired duration in seconds for R2V mode"}),
+                "default_fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 240.0, "step": 1.0, "tooltip": "Default FPS used when source_fps is not connected"}),
+                "minimax_align": ("BOOLEAN", {"default": True, "tooltip": "Align frame count to MiniMax H3 formula: max(5, round(sec * fps)) + (5 - (max(...) % 17)) % 17"}),
+            },
+            "optional": {
+                "source_duration": ("FLOAT", {"tooltip": "Optional duration in seconds from source video (Get_duration)"}),
+                "source_fps": ("FLOAT", {"tooltip": "Optional source video FPS (from Get_FPS or video loader, overrides default_fps)"}),
+            }
+        }
+
+    RETURN_TYPES = ("INT", "FLOAT", "FLOAT", "INT")
+    RETURN_NAMES = ("total_frames", "final_seconds", "effective_fps", "raw_frames")
+    FUNCTION = "calculate_duration"
+    CATEGORY = "AIMZ/Workflow"
+
+    def calculate_duration(self, mode="Custom Seconds (R2V)", custom_seconds=6.0, default_fps=24.0, minimax_align=True, source_duration=None, source_fps=None):
+        # 1. Determine Effective FPS
+        if source_fps is not None and isinstance(source_fps, (int, float)) and source_fps > 0:
+            effective_fps = float(source_fps)
+        else:
+            effective_fps = float(default_fps) if default_fps > 0 else 24.0
+
+        # 2. Determine Effective Duration (Seconds)
+        if mode == "Source Video (V2V)":
+            if source_duration is not None and isinstance(source_duration, (int, float)) and source_duration > 0:
+                effective_sec = float(source_duration)
+            else:
+                effective_sec = float(custom_seconds)
+        else:
+            effective_sec = float(custom_seconds)
+
+        # 3. Calculate Raw Frame Count
+        raw_frames = max(5, int(round(effective_sec * effective_fps)))
+
+        # 4. MiniMax H3 Alignment Formula: max(5, round(a * fps)) + (5 - (max(5, round(a * fps)) % 17)) % 17
+        if minimax_align:
+            remainder = raw_frames % 17
+            pad = (5 - remainder) % 17
+            total_frames = raw_frames + pad
+        else:
+            total_frames = raw_frames
+
+        # 5. Calculate Exact Final Seconds
+        final_seconds = round(total_frames / effective_fps, 3)
+
+        return (total_frames, final_seconds, effective_fps, raw_frames)

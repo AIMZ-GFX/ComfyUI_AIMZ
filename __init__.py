@@ -4,6 +4,7 @@ from .nodes import (
     AIMZ_FreezeFramePad,
     AIMZ_PreviewImageNoneSafe,
     AIMZ_SelectiveGroupBypasser,
+    AIMZ_VideoDurationSelector,
 )
 
 NODE_CLASS_MAPPINGS = {
@@ -12,6 +13,7 @@ NODE_CLASS_MAPPINGS = {
     "AIMZ_FreezeFramePad": AIMZ_FreezeFramePad,
     "AIMZ_PreviewImageNoneSafe": AIMZ_PreviewImageNoneSafe,
     "AIMZ_SelectiveGroupBypasser": AIMZ_SelectiveGroupBypasser,
+    "AIMZ_VideoDurationSelector": AIMZ_VideoDurationSelector,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -20,6 +22,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AIMZ_FreezeFramePad": "AIMZ Freeze Frame Pad",
     "AIMZ_PreviewImageNoneSafe": "AIMZ Preview Image (None Safe)",
     "AIMZ_SelectiveGroupBypasser": "AIMZ Selective Group Bypasser",
+    "AIMZ_VideoDurationSelector": "AIMZ Video Duration Selector",
 }
 
 WEB_DIRECTORY = "./web"

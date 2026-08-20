@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "comfyui_aimz"
-version = "0.2.2"
+version = "0.3.0"
 description = "A versatile collection of essential workflow helper and utility nodes for ComfyUI by AIMZ / CEC Tools."
 readme = "README.md"
 license = { text = "MIT" }
