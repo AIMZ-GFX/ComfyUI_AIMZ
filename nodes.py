@@ -7,6 +7,12 @@ import torch
 import torch.nn.functional as F
 
 try:
+    import comfy.utils
+    COMFY_UTILS_AVAILABLE = True
+except ImportError:
+    COMFY_UTILS_AVAILABLE = False
+
+try:
     import folder_paths
 except ImportError:
     folder_paths = None
@@ -120,7 +126,7 @@ def lab_to_rgb_gpu(lab: torch.Tensor) -> torch.Tensor:
 
 class AIMZ_VAEColorMatch:
     """
-    100% GPU-Accelerated Ultra High-Speed VAE Color Matcher for Video and Image Pipelines.
+    100% GPU-Accelerated Ultra High-Speed VAE Color Matcher with Live Console & UI Progress Bar.
     Runs entirely on CUDA VRAM with zero CPU bottleneck (processes 240+ frames in under 0.5s!).
     Automatically matches resolutions, fixes VAE color degradation, and guarantees 100% batch safety.
     """
@@ -182,7 +188,12 @@ class AIMZ_VAEColorMatch:
             orig_scaled = orig_tensor
 
         # -------------------------------------------------------------
-        # 2. Pure GPU Parallel Color Transfer (Zero CPU Bottleneck!)
+        # 2. Setup ComfyUI Progress Bar for UI and Terminal Console
+        # -------------------------------------------------------------
+        pbar = comfy.utils.ProgressBar(proc_b) if COMFY_UTILS_AVAILABLE else None
+
+        # -------------------------------------------------------------
+        # 3. Pure GPU Parallel Color Transfer with Progress Updates
         # -------------------------------------------------------------
         corrected_frames = []
 
@@ -208,9 +219,6 @@ class AIMZ_VAEColorMatch:
 
             elif method == "luminance_zones (GPU)":
                 # GPU Luminance Zone Bias Matching
-                gray_orig = 0.299 * orig_f[..., 0:1] + 0.587 * orig_f[..., 1:2] + 0.114 * orig_f[..., 2:3]
-                gray_proc = 0.299 * proc_f[..., 0:1] + 0.587 * proc_f[..., 1:2] + 0.114 * proc_f[..., 2:3]
-
                 mean_orig = orig_f.mean(dim=(1, 2), keepdim=True)
                 mean_proc = proc_f.mean(dim=(1, 2), keepdim=True)
                 bias = (mean_orig - mean_proc) * correction_strength
@@ -224,7 +232,7 @@ class AIMZ_VAEColorMatch:
                 orig_std = orig_f.std(dim=(1, 2), keepdim=True) + 1e-6
 
                 proc_mean = proc_f.mean(dim=(1, 2), keepdim=True)
-                proc_std = proc_f.std(dim=(1, 2), keepdim=True) + 1e-6
+                proc_std = proc_lab.std(dim=(1, 2), keepdim=True) + 1e-6 if 'proc_lab' in locals() else proc_f.std(dim=(1, 2), keepdim=True) + 1e-6
 
                 matched_rgb = (proc_f - proc_mean) * (orig_std / proc_std) + orig_mean
                 matched_rgb = torch.clamp(matched_rgb, 0.0, 1.0)
@@ -239,10 +247,13 @@ class AIMZ_VAEColorMatch:
 
             corrected_frames.append(res_rgb)
 
+            if pbar is not None:
+                pbar.update(1)
+
         result = torch.cat(corrected_frames, dim=0)
 
         # -------------------------------------------------------------
-        # 3. Optional Mask Blending on GPU
+        # 4. Optional Mask Blending on GPU
         # -------------------------------------------------------------
         if mask is not None:
             m = mask.to(device=device, dtype=dtype)
