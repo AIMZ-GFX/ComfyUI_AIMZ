@@ -132,10 +132,6 @@ def lab_to_rgb_cuda(lab: torch.Tensor) -> torch.Tensor:
 
 
 def match_histogram_cuda(source: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
-    """
-    Lightning-Fast GPU Parallel Histogram Matching.
-    source, reference must be on CUDA.
-    """
     B, H, W, C = source.shape
     N = H * W
 
@@ -165,16 +161,16 @@ class AIMZ_VAEColorMatch:
             "required": {
                 "original_image": ("IMAGE", {"tooltip": "Original reference video from Load Video/1st pass"}),
                 "processed_image": ("IMAGE", {"tooltip": "Target upscaled video from VAEDecode (LTX 2.5) with color drift"}),
-                "correction_strength": ("FLOAT", {"default": 0.85, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Color match strength (0.0 = no change, 1.0 = 100% exact original color match)"}),
+                "correction_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Color match strength (0.0 = no change, 1.0 = 100% exact original color match)"}),
                 "method": (
                     [
+                        "statistical_matching (GPU)",
                         "exact_histogram (GPU Powerful)", 
                         "lab_reinhard (GPU Perceptual)", 
                         "lab_histogram (GPU Cinematic)",
-                        "luminance_zones (GPU)", 
-                        "statistical_matching (GPU)"
+                        "luminance_zones (GPU)"
                     ], 
-                    {"default": "exact_histogram (GPU Powerful)", "tooltip": "Color matching algorithm:\n• exact_histogram: Exact cumulative histogram transfer (100% visible guaranteed color match!)\n• lab_reinhard: Human eye perceptual color/tone transfer\n• lab_histogram: Precise LAB histogram grading\n• luminance_zones: Brightness bias correction\n• statistical_matching: Fast RGB moment transfer"}
+                    {"default": "statistical_matching (GPU)", "tooltip": "Color matching algorithm:\n• statistical_matching: Fast and clean RGB moment transfer (Default)\n• exact_histogram: Exact cumulative histogram transfer\n• lab_reinhard: Human eye perceptual color/tone transfer\n• lab_histogram: Precise LAB histogram grading\n• luminance_zones: Brightness bias correction"}
                 ),
                 "auto_preserve": ("BOOLEAN", {"default": False, "tooltip": "Auto-preserve heavily altered areas (Keep False to restore full video frame)"}),
             },
@@ -191,8 +187,8 @@ class AIMZ_VAEColorMatch:
     CATEGORY = "AIMZ/Color"
 
     def correct_vae_colors(
-        self, original_image, processed_image, correction_strength=0.85, 
-        method="exact_histogram (GPU Powerful)", auto_preserve=False, vae=None, mask=None, edge_feather=5
+        self, original_image, processed_image, correction_strength=1.0, 
+        method="statistical_matching (GPU)", auto_preserve=False, vae=None, mask=None, edge_feather=5
     ):
         if original_image is None or processed_image is None:
             return (processed_image if processed_image is not None else original_image,)
@@ -225,7 +221,18 @@ class AIMZ_VAEColorMatch:
                     align_corners=False
                 ).permute(0, 2, 3, 1)
 
-            if method == "exact_histogram (GPU Powerful)":
+            if method == "statistical_matching (GPU)":
+                orig_mean = orig_f.mean(dim=(1, 2), keepdim=True)
+                orig_std = orig_f.std(dim=(1, 2), keepdim=True) + 1e-6
+
+                proc_mean = proc_f.mean(dim=(1, 2), keepdim=True)
+                proc_std = proc_f.std(dim=(1, 2), keepdim=True) + 1e-6
+
+                matched_rgb = (proc_f - proc_mean) * (orig_std / proc_std) + orig_mean
+                matched_rgb = torch.clamp(matched_rgb, 0.0, 1.0)
+                res_rgb = proc_f * (1.0 - correction_strength) + matched_rgb * correction_strength
+
+            elif method == "exact_histogram (GPU Powerful)":
                 matched = match_histogram_cuda(proc_f, orig_f)
                 res_rgb = proc_f * (1.0 - correction_strength) + matched * correction_strength
 
@@ -250,22 +257,11 @@ class AIMZ_VAEColorMatch:
                 blended_lab = proc_lab * (1.0 - correction_strength) + matched_lab * correction_strength
                 res_rgb = lab_to_rgb_cuda(blended_lab)
 
-            elif method == "luminance_zones (GPU)":
+            else:  # luminance_zones (GPU)
                 mean_orig = orig_f.mean(dim=(1, 2), keepdim=True)
                 mean_proc = proc_f.mean(dim=(1, 2), keepdim=True)
                 bias = (mean_orig - mean_proc) * correction_strength
                 matched_rgb = torch.clamp(proc_f + bias, 0.0, 1.0)
-                res_rgb = proc_f * (1.0 - correction_strength) + matched_rgb * correction_strength
-
-            else:  # statistical_matching (GPU)
-                orig_mean = orig_f.mean(dim=(1, 2), keepdim=True)
-                orig_std = orig_f.std(dim=(1, 2), keepdim=True) + 1e-6
-
-                proc_mean = proc_f.mean(dim=(1, 2), keepdim=True)
-                proc_std = proc_f.std(dim=(1, 2), keepdim=True) + 1e-6
-
-                matched_rgb = (proc_f - proc_mean) * (orig_std / proc_std) + orig_mean
-                matched_rgb = torch.clamp(matched_rgb, 0.0, 1.0)
                 res_rgb = proc_f * (1.0 - correction_strength) + matched_rgb * correction_strength
 
             res_rgb = torch.clamp(res_rgb, 0.0, 1.0)
