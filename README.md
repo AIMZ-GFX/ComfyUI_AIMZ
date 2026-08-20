@@ -6,7 +6,14 @@
 
 ## 🛠️ Nodes Included
 
-### 1. AIMZ Auto Multiple Pad
+### 1. AIMZ Selective Group Bypasser
+Selectively manages and toggles bypass states for user-chosen groups only.
+* **Curated Group Control:** Instead of cluttering your screen with every single group in the workflow (like standard Fast Groups Bypasser), this lets you select specific groups from a dropdown list to manage.
+* **Dynamic Toggle Buttons:** Added groups appear directly on the node with `🟢 [ACTIVE]` / `🔴 [BYPASS]` toggle buttons and a remove button (`❌`).
+* **Auto Resizing:** Automatically adjusts its height based on the number of managed groups.
+* **State Preservation:** Keeps your curated group list and bypass states intact across workflow saves and loads.
+
+### 2. AIMZ Auto Multiple Pad
 Automatically pads images, masks, or video frame batches to be divisible by any chosen multiple (default: **32**) with zero quality loss.
 * **None-Safe Pass-through:** If input image/video or mask is `None` (empty branch/slot), it passes through `None` and `0` without raising exceptions, enabling seamless dynamic conditional branching.
 * **Dimensions & Frame Count:** Also outputs `width`, `height`, and `count` (frame count), replacing `GetImageSizeAndCount` with full None-safety!
@@ -15,15 +22,15 @@ Automatically pads images, masks, or video frame batches to be divisible by any 
 * **Color Customization:** Supports named colors (`white`, `black`, `gray`), hex (`#ffffff`), and normalized RGB tuples (`1,1,1`, `0,0,0`).
 * **Mask Synchronization:** Accurately pads associated masks with identical offsets.
 
-### 2. AIMZ Freeze Frame Pad
+### 3. AIMZ Freeze Frame Pad
 Pads video frame sequences with repeated freeze frames at the beginning and/or end (e.g. 15 frames for MiniMax-H3 motion buffer).
 * **Replaces 5 Nodes:** Replaces `GetImageFromBatch` (start), `RepeatImages` (start), `GetImageFromBatch` (end), `RepeatImages` (end), and `ImageBatchMulti` into a single, clean node.
 * **None-Safe:** If video is `None`, passes through `None` and `count=0` cleanly without errors.
 
-### 3. AIMZ Auto Multiple Unpad
+### 4. AIMZ Auto Multiple Unpad
 Restores padded images or masks back to their original input dimensions using `pad_info` or manual coordinate offsets.
 
-### 4. AIMZ Preview Image (None Safe)
+### 5. AIMZ Preview Image (None Safe)
 A bulletproof replacement for ComfyUI's standard `PreviewImage` node.
 * **None-Safe:** If the input image is `None` or an empty branch, it skips cleanly **without throwing `TypeError: NoneType` errors**.
 * **Pass-Through Output:** Also outputs the image so you can chain it cleanly in your workflows.

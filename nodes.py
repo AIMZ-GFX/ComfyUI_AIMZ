@@ -366,3 +366,28 @@ class AIMZ_PreviewImageNoneSafe:
             counter += 1
 
         return {"ui": {"images": results}, "result": (images,)}
+
+
+class AIMZ_SelectiveGroupBypasser:
+    """
+    Selectively manages and toggles bypass states for user-chosen groups only.
+    Unlike Fast Groups Bypasser which lists every group, this lets you curate
+    a clean list of specific groups to toggle Active / Bypass directly from the node.
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {},
+            "optional": {
+                "opt_connection": ("*", {"tooltip": "Optional flow-through connection"}),
+            },
+        }
+
+    RETURN_TYPES = ("*",)
+    RETURN_NAMES = ("opt_connection",)
+    FUNCTION = "passthrough"
+    OUTPUT_NODE = True
+    CATEGORY = "AIMZ/Workflow"
+
+    def passthrough(self, opt_connection=None):
+        return (opt_connection,)
