@@ -13,6 +13,7 @@ app.registerExtension({
                 this.properties.managedGroups = this.properties.managedGroups || [];
 
                 const node = this;
+                let draggingIndex = null;
 
                 // Helper: Get all groups from canvas
                 function getCanvasGroups() {
@@ -79,7 +80,49 @@ app.registerExtension({
                     node.rebuildDynamicWidgets();
                 };
 
-                // Rebuild sleek, compact 1-line custom widgets with clean Left-Alignment & Modern LED Dot UI
+                // Method to swap / reorder groups
+                node.moveManagedGroup = function (fromIndex, toIndex) {
+                    if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0 || 
+                        fromIndex >= node.properties.managedGroups.length || 
+                        toIndex >= node.properties.managedGroups.length) {
+                        return;
+                    }
+                    const item = node.properties.managedGroups.splice(fromIndex, 1)[0];
+                    node.properties.managedGroups.splice(toIndex, 0, item);
+                    node.rebuildDynamicWidgets();
+                };
+
+                // Global mousemove/mouseup listener for smooth drag-reorder
+                const onCanvasMouseMove = (e) => {
+                    if (draggingIndex === null) return;
+
+                    // Calculate which row index cursor is currently hovering over
+                    const nodePos = node.pos;
+                    const canvasMouse = app.canvas.graph_to_canvas ? app.canvas.graph_to_canvas(nodePos) : nodePos;
+                    // Widget row calculation
+                    const staticHeight = 85;
+                    const rowHeight = 28;
+                    const relativeY = e.canvasY ? (e.canvasY - node.pos[1]) : (e.clientY - node.pos[1]);
+                    
+                    const targetIdx = Math.floor((relativeY - staticHeight + 20) / rowHeight);
+                    if (targetIdx >= 0 && targetIdx < node.properties.managedGroups.length && targetIdx !== draggingIndex) {
+                        node.moveManagedGroup(draggingIndex, targetIdx);
+                        draggingIndex = targetIdx;
+                    }
+                };
+
+                const onCanvasMouseUp = () => {
+                    if (draggingIndex !== null) {
+                        draggingIndex = null;
+                        document.removeEventListener("pointermove", onCanvasMouseMove);
+                        document.removeEventListener("pointerup", onCanvasMouseUp);
+                        document.removeEventListener("mousemove", onCanvasMouseMove);
+                        document.removeEventListener("mouseup", onCanvasMouseUp);
+                        if (app.canvas) app.canvas.setDirty(true, true);
+                    }
+                };
+
+                // Rebuild sleek, compact 1-line custom widgets with Drag Handle [≡]
                 node.rebuildDynamicWidgets = function () {
                     const staticCount = 2;
                     while (node.widgets.length > staticCount) {
@@ -100,7 +143,7 @@ app.registerExtension({
 
                                 ctx.save();
 
-                                // 1. Modern Glassmorphism Row Background
+                                // 1. Glassmorphism Row Background
                                 ctx.beginPath();
                                 ctx.roundRect(x, y, w, h, 4);
                                 ctx.fillStyle = gItem.bypassed ? "rgba(45, 20, 20, 0.7)" : "rgba(20, 38, 28, 0.7)";
@@ -110,7 +153,7 @@ app.registerExtension({
                                 ctx.stroke();
 
                                 // 2. Sleek Neon LED Indicator Dot (Left Aligned)
-                                const dotX = x + 12;
+                                const dotX = x + 10;
                                 const dotY = y + h / 2;
                                 const dotRadius = 4;
 
@@ -119,7 +162,6 @@ app.registerExtension({
                                 ctx.fillStyle = gItem.bypassed ? "#ff4d4d" : "#00e676";
                                 ctx.fill();
 
-                                // Glow effect for Active LED
                                 if (!gItem.bypassed) {
                                     ctx.beginPath();
                                     ctx.arc(dotX, dotY, dotRadius + 2, 0, Math.PI * 2);
@@ -127,7 +169,7 @@ app.registerExtension({
                                     ctx.fill();
                                 }
 
-                                // 3. Status Tag (Left Aligned, Modern Typography)
+                                // 3. Status Tag
                                 ctx.font = "600 10px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
                                 ctx.fillStyle = gItem.bypassed ? "#ff7b7b" : "#69f0ae";
                                 ctx.textAlign = "left";
@@ -135,12 +177,12 @@ app.registerExtension({
                                 const statusText = gItem.bypassed ? "BYPASS" : "ACTIVE";
                                 ctx.fillText(statusText, dotX + 8, dotY);
 
-                                // 4. Group Title (Left Aligned, Clean)
-                                const titleX = dotX + 62;
+                                // 4. Group Title
+                                const titleX = dotX + 60;
                                 ctx.font = "11px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
                                 ctx.fillStyle = gItem.bypassed ? "#8a8a8a" : "#f0f0f0";
                                 
-                                const maxTitleW = w - 90;
+                                const maxTitleW = w - 110;
                                 let title = gItem.title;
                                 if (ctx.measureText(title).width > maxTitleW) {
                                     while (title.length > 3 && ctx.measureText(title + "...").width > maxTitleW) {
@@ -150,7 +192,28 @@ app.registerExtension({
                                 }
                                 ctx.fillText(title, titleX, dotY);
 
-                                // 5. Minimalist Ghost Delete Button (Right Aligned)
+                                // 5. Drag Reorder Handle [≡]
+                                const handleW = 18;
+                                const handleH = 16;
+                                const handleX = x + w - handleW - 24;
+                                const handleY = y + (h - handleH) / 2;
+
+                                ctx.beginPath();
+                                ctx.roundRect(handleX, handleY, handleW, handleH, 3);
+                                ctx.fillStyle = "rgba(255, 255, 255, 0.05)";
+                                ctx.fill();
+
+                                // Draw 3 horizontal lines (≡)
+                                ctx.strokeStyle = "#888888";
+                                ctx.lineWidth = 1.5;
+                                for (let i = -3; i <= 3; i += 3) {
+                                    ctx.beginPath();
+                                    ctx.moveTo(handleX + 4, dotY + i);
+                                    ctx.lineTo(handleX + handleW - 4, dotY + i);
+                                    ctx.stroke();
+                                }
+
+                                // 6. Minimalist Ghost Delete Button [✕]
                                 const delBtnW = 16;
                                 const delBtnH = 16;
                                 const delBtnX = x + w - delBtnW - 4;
@@ -182,14 +245,27 @@ app.registerExtension({
                                     const delBtnW = 16;
                                     const delBtnX = x + w - delBtnW - 4;
 
-                                    // Check if clicked the [X] button
+                                    const handleW = 18;
+                                    const handleX = x + w - handleW - 24;
+
+                                    // 1. Clicked [✕] Delete Button
                                     if (clickX >= delBtnX && clickX <= (delBtnX + delBtnW)) {
                                         node.removeManagedGroup(this.index);
                                         return true;
                                     }
 
-                                    // Otherwise clicked the row -> Toggle Bypass
-                                    if (clickX >= x && clickX < delBtnX) {
+                                    // 2. Clicked [≡] Drag Handle -> Start Drag Reordering
+                                    if (clickX >= handleX && clickX <= (handleX + handleW)) {
+                                        draggingIndex = this.index;
+                                        document.addEventListener("pointermove", onCanvasMouseMove);
+                                        document.addEventListener("pointerup", onCanvasMouseUp);
+                                        document.addEventListener("mousemove", onCanvasMouseMove);
+                                        document.addEventListener("mouseup", onCanvasMouseUp);
+                                        return true;
+                                    }
+
+                                    // 3. Clicked the Row Body -> Toggle Bypass
+                                    if (clickX >= x && clickX < handleX) {
                                         node.toggleGroupBypass(this.groupItem);
                                         return true;
                                     }
@@ -205,7 +281,7 @@ app.registerExtension({
                     });
 
                     // Sleek auto-resizing
-                    const minWidth = 260;
+                    const minWidth = 280;
                     const calculatedHeight = 85 + (node.properties.managedGroups.length * 28);
                     node.size = [Math.max(node.size[0] || minWidth, minWidth), calculatedHeight];
 
