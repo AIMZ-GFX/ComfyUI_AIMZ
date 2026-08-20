@@ -137,8 +137,9 @@ def lab_to_rgb(lab: torch.Tensor) -> torch.Tensor:
 class AIMZ_VAEColorMatch:
     """
     Robust VAE Color Matcher and Drift Corrector for Video and Image Pipelines.
-    Fixes VAE decode color degradation (washed-out tones, green/yellow tints, gamma drift)
-    by transferring original color distribution statistics (LAB / Luminance Zones / RGB moments).
+    Dual Mode Support:
+    1. Standalone Post-Processor: Put after VAEDecode (connect original_image + processed_image).
+    2. All-in-One VAE Decoder: Connect original_image + samples (LATENT) + vae (VAE) to decode and match colors in 1 step!
     100% immune to frame-count mismatches (e.g. MiniMax 243 vs LTX 241 frames) and resolution differences!
     """
     @classmethod
@@ -146,12 +147,13 @@ class AIMZ_VAEColorMatch:
         return {
             "required": {
                 "original_image": ("IMAGE", {"tooltip": "Reference original image/video (before VAE decode / 1st pass)"}),
-                "processed_image": ("IMAGE", {"tooltip": "Upscaled or VAE-decoded image/video with color shift to be corrected"}),
                 "strength": ("FLOAT", {"default": 0.85, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Correction strength (0.0 = no change, 1.0 = full color match)"}),
                 "method": (["lab_moments (Reinhard)", "luminance_zones", "rgb_moments"], {"default": "lab_moments (Reinhard)", "tooltip": "Color matching algorithm:\n• lab_moments: Best perceptual color and tone transfer\n• luminance_zones: Preserves local lighting while correcting tints\n• rgb_moments: Fast global RGB channel match"}),
             },
             "optional": {
-                "vae": ("VAE", {"tooltip": "Optional VAE model input for pipeline consistency"}),
+                "processed_image": ("IMAGE", {"tooltip": "Option A: Connect image from VAEDecode"}),
+                "samples": ("LATENT", {"tooltip": "Option B: Connect Latent directly (auto-decodes if vae is connected!)"}),
+                "vae": ("VAE", {"tooltip": "Option B: Connect VAE model to decode samples automatically"}),
                 "mask": ("MASK", {"tooltip": "Optional mask to limit correction areas"}),
             }
         }
@@ -161,16 +163,22 @@ class AIMZ_VAEColorMatch:
     FUNCTION = "match_colors"
     CATEGORY = "AIMZ/Color"
 
-    def match_colors(self, original_image, processed_image, strength=0.85, method="lab_moments (Reinhard)", vae=None, mask=None):
-        if original_image is None or processed_image is None:
-            return (processed_image if processed_image is not None else original_image,)
-
-        if strength <= 0.001:
-            return (processed_image,)
-
-        orig = original_image
+    def match_colors(self, original_image, strength=0.85, method="lab_moments (Reinhard)", processed_image=None, samples=None, vae=None, mask=None):
         proc = processed_image
 
+        # Auto-Decode if samples (LATENT) and vae are provided instead of processed_image
+        if proc is None and samples is not None and vae is not None:
+            latent_tensor = samples.get("samples")
+            if latent_tensor is not None:
+                proc = vae.decode(latent_tensor)
+
+        if original_image is None or proc is None:
+            return (proc if proc is not None else original_image,)
+
+        if strength <= 0.001:
+            return (proc,)
+
+        orig = original_image
         device = proc.device
         dtype = proc.dtype
         orig = orig.to(device=device, dtype=dtype)
