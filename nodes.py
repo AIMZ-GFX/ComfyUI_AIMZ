@@ -297,6 +297,80 @@ class AIMZ_FreezeFramePad:
         return (padded_video, padded_video.shape[0])
 
 
+class AIMZ_AudioSilencePad:
+    """
+    Pads an audio sequence with exact silence at the start and end based on video frame counts.
+    Replaces 8~10 separate nodes (Int x2, Math Expression x2, Empty Audio x2, Concatenate Audio x2).
+    Automatically matches sample rate and channel layout, and supports dynamic FPS override.
+    Completely safe against None inputs (returns None without crashing for optional audio branches).
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "pad_start_frames": ("INT", {"default": 15, "min": 0, "max": 10000, "step": 1, "tooltip": "Number of frames to pad with silence at the start"}),
+                "pad_end_frames": ("INT", {"default": 15, "min": 0, "max": 10000, "step": 1, "tooltip": "Number of frames to pad with silence at the end"}),
+                "default_fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 240.0, "step": 1.0, "tooltip": "Default FPS used when source_fps is not connected"}),
+            },
+            "optional": {
+                "audio": ("AUDIO", {"tooltip": "Input audio dictionary {'waveform': tensor, 'sample_rate': int}. If None, returns None without error."}),
+                "source_fps": ("FLOAT", {"tooltip": "Optional source video FPS (from Get_FPS or video loader, overrides default_fps)"}),
+            }
+        }
+
+    RETURN_TYPES = ("AUDIO", "FLOAT", "FLOAT", "FLOAT")
+    RETURN_NAMES = ("audio", "total_duration", "pad_start_sec", "pad_end_sec")
+    FUNCTION = "pad_audio"
+    CATEGORY = "AIMZ/Audio"
+
+    def pad_audio(self, pad_start_frames=15, pad_end_frames=15, default_fps=24.0, audio=None, source_fps=None):
+        if audio is None:
+            return (None, 0.0, 0.0, 0.0)
+
+        waveform = audio.get("waveform")
+        sample_rate = audio.get("sample_rate", 44100)
+
+        if waveform is None or not isinstance(waveform, torch.Tensor) or waveform.numel() == 0:
+            return (None, 0.0, 0.0, 0.0)
+
+        # Determine effective FPS
+        if source_fps is not None and isinstance(source_fps, (int, float)) and source_fps > 0:
+            fps = float(source_fps)
+        else:
+            fps = float(default_fps) if default_fps > 0 else 24.0
+
+        # Calculate exact padding seconds and sample counts
+        start_sec = (pad_start_frames / fps) if pad_start_frames > 0 else 0.0
+        end_sec = (pad_end_frames / fps) if pad_end_frames > 0 else 0.0
+
+        num_start_samples = int(round(start_sec * sample_rate))
+        num_end_samples = int(round(end_sec * sample_rate))
+
+        # Waveform tensor shape: [Batch, Channels, Samples] or [Channels, Samples]
+        shape_prefix = list(waveform.shape[:-1])
+        
+        chunks = []
+        if num_start_samples > 0:
+            silence_start = torch.zeros(*shape_prefix, num_start_samples, dtype=waveform.dtype, device=waveform.device)
+            chunks.append(silence_start)
+        
+        chunks.append(waveform)
+
+        if num_end_samples > 0:
+            silence_end = torch.zeros(*shape_prefix, num_end_samples, dtype=waveform.dtype, device=waveform.device)
+            chunks.append(silence_end)
+
+        padded_waveform = torch.cat(chunks, dim=-1)
+        total_duration = round(padded_waveform.shape[-1] / sample_rate, 3)
+
+        result_audio = {
+            "waveform": padded_waveform,
+            "sample_rate": sample_rate
+        }
+
+        return (result_audio, total_duration, round(start_sec, 4), round(end_sec, 4))
+
+
 class AIMZ_PreviewImageNoneSafe:
     """
     A None-Safe Image Preview node.
