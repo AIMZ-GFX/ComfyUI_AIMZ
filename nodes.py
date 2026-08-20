@@ -54,10 +54,9 @@ def parse_color(color_str):
 
 
 # -------------------------------------------------------------
-# 100% Pure PyTorch GPU-Accelerated Color Conversions & Algorithms
+# Color Space Conversion (Pure PyTorch GPU)
 # -------------------------------------------------------------
 def rgb_to_lab_gpu(rgb: torch.Tensor) -> torch.Tensor:
-    """Fast GPU-accelerated sRGB to CIE-LAB conversion."""
     mask = rgb > 0.04045
     rgb_lin = torch.where(mask, torch.pow((rgb + 0.055) / 1.055, 2.4), rgb / 12.92)
 
@@ -86,7 +85,6 @@ def rgb_to_lab_gpu(rgb: torch.Tensor) -> torch.Tensor:
 
 
 def lab_to_rgb_gpu(lab: torch.Tensor) -> torch.Tensor:
-    """Fast GPU-accelerated CIE-LAB to sRGB conversion."""
     L = lab[..., 0]
     a = lab[..., 1]
     b_val = lab[..., 2]
@@ -124,24 +122,56 @@ def lab_to_rgb_gpu(lab: torch.Tensor) -> torch.Tensor:
     return torch.clamp(rgb, 0.0, 1.0)
 
 
+# -------------------------------------------------------------
+# Exact Cumulative Histogram Matching (Pure GPU CUDA)
+# -------------------------------------------------------------
+def match_histogram_gpu(source: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+    """
+    Exact Cumulative Distribution Matching on GPU.
+    source: [1, H_proc, W_proc, C]
+    reference: [1, H_orig, W_orig, C]
+    """
+    B, H, W, C = source.shape
+    N = H * W
+
+    src_flat = source.view(B, N, C)
+    ref_flat = reference.view(B, -1, C)
+    N_ref = ref_flat.shape[1]
+
+    ref_sorted, _ = torch.sort(ref_flat, dim=1)
+    _, src_indices = torch.sort(src_flat, dim=1)
+    _, src_rank = torch.sort(src_indices, dim=1)
+
+    ref_indices = (src_rank.float() * ((N_ref - 1) / max(1, N - 1))).long()
+    ref_indices = torch.clamp(ref_indices, 0, N_ref - 1)
+
+    matched = torch.gather(ref_sorted, 1, ref_indices)
+    return matched.view(B, H, W, C)
+
+
 class AIMZ_VAEColorMatch:
     """
-    100% GPU-Accelerated Ultra High-Speed VAE Color Matcher with Live Console & UI Progress Bar.
-    Runs entirely on CUDA VRAM with zero CPU bottleneck (processes 240+ frames in under 0.5s!).
-    Automatically matches resolutions, fixes VAE color degradation, and guarantees 100% batch safety.
+    True Color Matcher & VAE Color Drift Restorer for Video and Image Pipelines.
+    Guarantees visible, accurate color restoration with 100% GPU acceleration and Live Progress Bar.
     """
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "original_image": ("IMAGE", {"tooltip": "Original reference video (will be auto-resized to match processed_image on GPU)"}),
-                "processed_image": ("IMAGE", {"tooltip": "Upscaled high-res video from VAEDecode (LTX 2.5) with color shifts"}),
-                "correction_strength": ("FLOAT", {"default": 0.85, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Correction strength (0.0 = no change, 1.0 = full 100% color match)"}),
+                "original_image": ("IMAGE", {"tooltip": "Original reference video from Load Video/1st pass"}),
+                "processed_image": ("IMAGE", {"tooltip": "Target upscaled video from VAEDecode (LTX 2.5) with color drift"}),
+                "correction_strength": ("FLOAT", {"default": 0.85, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Color match strength (0.0 = no change, 1.0 = 100% exact original color match)"}),
                 "method": (
-                    ["lab_reinhard (GPU Ultra-Fast)", "luminance_zones (GPU)", "statistical_matching (GPU)", "color_moment_matching (GPU)"], 
-                    {"default": "lab_reinhard (GPU Ultra-Fast)", "tooltip": "100% GPU-Accelerated Color Matching Algorithm"}
+                    [
+                        "exact_histogram (GPU Powerful)", 
+                        "lab_reinhard (GPU Perceptual)", 
+                        "lab_histogram (GPU Cinematic)",
+                        "luminance_zones (GPU)", 
+                        "statistical_matching (GPU)"
+                    ], 
+                    {"default": "exact_histogram (GPU Powerful)", "tooltip": "Color matching algorithm:\n• exact_histogram: Exact cumulative histogram transfer (100% visible guaranteed color match!)\n• lab_reinhard: Human eye perceptual color/tone transfer\n• lab_histogram: Precise LAB histogram grading\n• luminance_zones: Brightness bias correction\n• statistical_matching: Fast RGB moment transfer"}
                 ),
-                "auto_preserve": ("BOOLEAN", {"default": False, "tooltip": "Auto-detect and preserve heavily altered areas (Keep False for full video color restoration)"}),
+                "auto_preserve": ("BOOLEAN", {"default": False, "tooltip": "Auto-preserve heavily altered areas (Keep False to restore full video frame)"}),
             },
             "optional": {
                 "vae": ("VAE", {"tooltip": "Optional VAE model input for pipeline consistency"}),
@@ -157,7 +187,7 @@ class AIMZ_VAEColorMatch:
 
     def correct_vae_colors(
         self, original_image, processed_image, correction_strength=0.85, 
-        method="lab_reinhard (GPU Ultra-Fast)", auto_preserve=False, vae=None, mask=None, edge_feather=5
+        method="exact_histogram (GPU Powerful)", auto_preserve=False, vae=None, mask=None, edge_feather=5
     ):
         if original_image is None or processed_image is None:
             return (processed_image if processed_image is not None else original_image,)
@@ -171,12 +201,10 @@ class AIMZ_VAEColorMatch:
         orig_b, orig_h, orig_w, _ = original_image.shape
         proc_b, proc_h, proc_w, _ = processed_image.shape
 
-        # -------------------------------------------------------------
-        # 1. Ultra-Fast GPU Dynamic Resolution Scaling
-        # -------------------------------------------------------------
         orig_tensor = original_image.to(device=device, dtype=dtype)
         proc_tensor = processed_image.to(device=device, dtype=dtype)
 
+        # Dynamic Resolution Alignment
         if (orig_h, orig_w) != (proc_h, proc_w):
             orig_scaled = F.interpolate(
                 orig_tensor.permute(0, 3, 1, 2),
@@ -187,14 +215,7 @@ class AIMZ_VAEColorMatch:
         else:
             orig_scaled = orig_tensor
 
-        # -------------------------------------------------------------
-        # 2. Setup ComfyUI Progress Bar for UI and Terminal Console
-        # -------------------------------------------------------------
         pbar = comfy.utils.ProgressBar(proc_b) if COMFY_UTILS_AVAILABLE else None
-
-        # -------------------------------------------------------------
-        # 3. Pure GPU Parallel Color Transfer with Progress Updates
-        # -------------------------------------------------------------
         corrected_frames = []
 
         for i in range(proc_b):
@@ -202,8 +223,18 @@ class AIMZ_VAEColorMatch:
             orig_f = orig_scaled[orig_idx:orig_idx+1]
             proc_f = proc_tensor[i:i+1]
 
-            if method == "lab_reinhard (GPU Ultra-Fast)":
-                # CIE-LAB Reinhard Transfer on GPU
+            if method == "exact_histogram (GPU Powerful)":
+                matched = match_histogram_gpu(proc_f, orig_f)
+                res_rgb = proc_f * (1.0 - correction_strength) + matched * correction_strength
+
+            elif method == "lab_histogram (GPU Cinematic)":
+                orig_lab = rgb_to_lab_gpu(orig_f)
+                proc_lab = rgb_to_lab_gpu(proc_f)
+                matched_lab = match_histogram_gpu(proc_lab, orig_lab)
+                blended_lab = proc_lab * (1.0 - correction_strength) + matched_lab * correction_strength
+                res_rgb = lab_to_rgb_gpu(blended_lab)
+
+            elif method == "lab_reinhard (GPU Perceptual)":
                 orig_lab = rgb_to_lab_gpu(orig_f)
                 proc_lab = rgb_to_lab_gpu(proc_f)
 
@@ -218,27 +249,25 @@ class AIMZ_VAEColorMatch:
                 res_rgb = lab_to_rgb_gpu(blended_lab)
 
             elif method == "luminance_zones (GPU)":
-                # GPU Luminance Zone Bias Matching
                 mean_orig = orig_f.mean(dim=(1, 2), keepdim=True)
                 mean_proc = proc_f.mean(dim=(1, 2), keepdim=True)
                 bias = (mean_orig - mean_proc) * correction_strength
-
                 matched_rgb = torch.clamp(proc_f + bias, 0.0, 1.0)
                 res_rgb = proc_f * (1.0 - correction_strength) + matched_rgb * correction_strength
 
-            else:  # statistical_matching / color_moment_matching (GPU)
-                # Fast RGB Moments Transfer on GPU
+            else:  # statistical_matching (GPU)
                 orig_mean = orig_f.mean(dim=(1, 2), keepdim=True)
                 orig_std = orig_f.std(dim=(1, 2), keepdim=True) + 1e-6
 
                 proc_mean = proc_f.mean(dim=(1, 2), keepdim=True)
-                proc_std = proc_lab.std(dim=(1, 2), keepdim=True) + 1e-6 if 'proc_lab' in locals() else proc_f.std(dim=(1, 2), keepdim=True) + 1e-6
+                proc_std = proc_f.std(dim=(1, 2), keepdim=True) + 1e-6
 
                 matched_rgb = (proc_f - proc_mean) * (orig_std / proc_std) + orig_mean
                 matched_rgb = torch.clamp(matched_rgb, 0.0, 1.0)
                 res_rgb = proc_f * (1.0 - correction_strength) + matched_rgb * correction_strength
 
-            # Auto-preserve detection on GPU
+            res_rgb = torch.clamp(res_rgb, 0.0, 1.0)
+
             if auto_preserve:
                 diff = torch.abs(orig_f - proc_f).mean(dim=-1, keepdim=True)
                 thresh = torch.quantile(diff.view(-1), 0.75)
@@ -252,9 +281,6 @@ class AIMZ_VAEColorMatch:
 
         result = torch.cat(corrected_frames, dim=0)
 
-        # -------------------------------------------------------------
-        # 4. Optional Mask Blending on GPU
-        # -------------------------------------------------------------
         if mask is not None:
             m = mask.to(device=device, dtype=dtype)
             if m.dim() == 2: m = m.unsqueeze(0).unsqueeze(-1)
