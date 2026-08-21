@@ -673,6 +673,21 @@ class AIMZ_SelectiveGroupBypasser:
         return (opt_connection,)
 
 
+def safe_float(val):
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, (list, tuple)) and len(val) > 0:
+        return safe_float(val[0])
+    if isinstance(val, str):
+        try:
+            return float(val.strip())
+        except Exception:
+            return None
+    return None
+
+
 class AIMZ_VideoDurationSelector:
     @classmethod
     def INPUT_TYPES(s):
@@ -695,18 +710,19 @@ class AIMZ_VideoDurationSelector:
     CATEGORY = "AIMZ/Workflow"
 
     def calculate_duration(self, mode="Source Video (V2V)", custom_seconds=6.0, default_fps=24.0, minimax_align=True, source_duration=None, source_fps=None):
-        if source_fps is not None and isinstance(source_fps, (int, float)) and source_fps > 0:
-            effective_fps = float(source_fps)
-        else:
-            effective_fps = float(default_fps) if default_fps > 0 else 24.0
+        fps_val = safe_float(source_fps)
+        def_fps_val = safe_float(default_fps) or 24.0
+        effective_fps = fps_val if (fps_val is not None and fps_val > 0) else def_fps_val
 
         if mode == "Source Video (V2V)":
-            if source_duration is not None and isinstance(source_duration, (int, float)) and source_duration > 0:
-                effective_sec = float(source_duration)
+            sec_val = safe_float(source_duration)
+            if sec_val is not None and sec_val > 0:
+                effective_sec = sec_val
             else:
                 return (0, 0.0, effective_fps, 0)
         else:
-            effective_sec = float(custom_seconds)
+            custom_sec_val = safe_float(custom_seconds) or 6.0
+            effective_sec = custom_sec_val
 
         raw_frames = max(5, int(round(effective_sec * effective_fps)))
 
@@ -720,3 +736,4 @@ class AIMZ_VideoDurationSelector:
         final_seconds = round(total_frames / effective_fps, 3)
 
         return (total_frames, final_seconds, effective_fps, raw_frames)
+
