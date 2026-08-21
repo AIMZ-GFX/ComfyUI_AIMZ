@@ -699,27 +699,40 @@ class AIMZ_VideoDurationSelector:
                 "minimax_align": ("BOOLEAN", {"default": True, "tooltip": "Align frame count to MiniMax H3 formula: max(5, round(sec * fps)) + (5 - (max(...) % 17)) % 17"}),
             },
             "optional": {
-                "source_duration": ("FLOAT", {"forceInput": True, "tooltip": "Connect Get_duration (seconds)"}),
-                "source_fps": ("FLOAT", {"forceInput": True, "tooltip": "Connect Get_FPS"}),
+                "source_frames": ("INT", {"forceInput": True, "tooltip": "Connect Get_length or video frame_count directly (Optional, None-safe)"}),
+                "source_duration": ("FLOAT", {"forceInput": True, "tooltip": "Connect source video duration in seconds (Optional, None-safe)"}),
+                "source_fps": ("FLOAT", {"forceInput": True, "tooltip": "Connect Get_FPS (Optional, None-safe)"}),
             }
         }
 
-    RETURN_TYPES = ("INT", "FLOAT", "FLOAT", "INT")
-    RETURN_NAMES = ("total_frames", "final_seconds", "effective_fps", "raw_frames")
+    RETURN_TYPES = ("INT", "FLOAT", "FLOAT", "INT", "FLOAT")
+    RETURN_NAMES = ("total_frames", "final_seconds", "effective_fps", "raw_frames", "source_seconds")
     FUNCTION = "calculate_duration"
     CATEGORY = "AIMZ/Workflow"
 
-    def calculate_duration(self, mode="Source Video (V2V)", custom_seconds=6.0, default_fps=24.0, minimax_align=True, source_duration=None, source_fps=None):
+    def calculate_duration(self, mode="Source Video (V2V)", custom_seconds=6.0, default_fps=24.0, minimax_align=True, source_frames=None, source_duration=None, source_fps=None):
         fps_val = safe_float(source_fps)
         def_fps_val = safe_float(default_fps) or 24.0
         effective_fps = fps_val if (fps_val is not None and fps_val > 0) else def_fps_val
 
+        # 1. Determine Source Duration in Seconds (from source_frames or source_duration)
+        src_sec = None
+        frames_val = safe_float(source_frames)
+        dur_val = safe_float(source_duration)
+
+        if frames_val is not None and frames_val > 0:
+            src_sec = frames_val / effective_fps
+        elif dur_val is not None and dur_val > 0:
+            src_sec = dur_val
+
+        source_seconds = round(src_sec, 3) if src_sec is not None else 0.0
+
+        # 2. Handle V2V vs R2V mode
         if mode == "Source Video (V2V)":
-            sec_val = safe_float(source_duration)
-            if sec_val is not None and sec_val > 0:
-                effective_sec = sec_val
+            if src_sec is not None and src_sec > 0:
+                effective_sec = src_sec
             else:
-                return (0, 0.0, effective_fps, 0)
+                return (0, 0.0, effective_fps, 0, 0.0)
         else:
             custom_sec_val = safe_float(custom_seconds) or 6.0
             effective_sec = custom_sec_val
@@ -735,5 +748,6 @@ class AIMZ_VideoDurationSelector:
 
         final_seconds = round(total_frames / effective_fps, 3)
 
-        return (total_frames, final_seconds, effective_fps, raw_frames)
+        return (total_frames, final_seconds, effective_fps, raw_frames, source_seconds)
+
 
